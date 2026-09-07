@@ -3,6 +3,7 @@ use crate::commands::gitops_crd::{
     list_crd_objects, resource_metadata, resource_status, resource_yaml,
 };
 use crate::commands::helpers::{k8s_creation_timestamp_to_rfc3339, resource_age};
+use crate::models::AppErrorKind;
 use crate::models::{
     evaluate_health, AppError, FluxDetectionSummary, FluxInventoryResource, FluxResourceDetails,
     FluxResourceKind, FluxResourceSummary, HealthAssessment, HealthAssessmentEvidence,
@@ -178,13 +179,13 @@ pub async fn get_flux_resource_details(
     let client = client_for_context(&cluster_context, kubeconfig_env_var).await?;
     let resource_kind = installed_flux_kind(&client, &resource_kind)
         .await?
-        .ok_or_else(|| AppError::new("Flux resource kind not found", "cluster"))?;
+        .ok_or_else(|| AppError::new("Flux resource kind not found", AppErrorKind::Cluster))?;
     let api_resource = api_resource_from_flux_kind(&resource_kind);
     let namespace = if resource_kind.namespaced {
         Some(namespace.as_deref().ok_or_else(|| {
             AppError::new(
                 "Namespace required for namespaced Flux resource",
-                "validation",
+                AppErrorKind::Validation,
             )
         })?)
     } else {

@@ -8,6 +8,7 @@ use crate::commands::{
     kubeconfig::KubeconfigSource,
     BackendCancellationRegistry,
 };
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, ArgoApplicationHistory, ArgoApplicationInspector, ArgoApplicationRef,
     ArgoConnectionProfile, ArgoConnectionStatus, ArgoManagedResource, ArgoResourceComparison,
@@ -69,7 +70,7 @@ pub(crate) fn kubeconfig_source_key(value: Option<&str>) -> Result<String, AppEr
 fn cleanup_error() -> AppError {
     AppError::new(
         "Argo CD connection was cancelled by workspace cleanup",
-        "argoConnection",
+        AppErrorKind::ArgoConnection,
     )
 }
 
@@ -99,13 +100,19 @@ impl ArgoConnectionStore {
                 .connections
                 .lock()
                 .map_err(|_| {
-                    AppError::new("Argo CD connection state unavailable", "argoConnection")
+                    AppError::new(
+                        "Argo CD connection state unavailable",
+                        AppErrorKind::ArgoConnection,
+                    )
                 })?
                 .get(&id)
                 .cloned();
             let Some(old) = old else {
                 let mut connections = self.connections.lock().map_err(|_| {
-                    AppError::new("Argo CD connection state unavailable", "argoConnection")
+                    AppError::new(
+                        "Argo CD connection state unavailable",
+                        AppErrorKind::ArgoConnection,
+                    )
                 })?;
                 if self.connection_epoch() != expected_epoch {
                     return Err(cleanup_error());
@@ -118,7 +125,10 @@ impl ArgoConnectionStore {
             };
             let _lease = old.gate.clone().lock_owned().await;
             let mut connections = self.connections.lock().map_err(|_| {
-                AppError::new("Argo CD connection state unavailable", "argoConnection")
+                AppError::new(
+                    "Argo CD connection state unavailable",
+                    AppErrorKind::ArgoConnection,
+                )
             })?;
             if self.connection_epoch() != expected_epoch {
                 return Err(cleanup_error());
@@ -140,7 +150,12 @@ impl ArgoConnectionStore {
         let ids = self
             .connections
             .lock()
-            .map_err(|_| AppError::new("Argo CD connection state unavailable", "argoConnection"))?
+            .map_err(|_| {
+                AppError::new(
+                    "Argo CD connection state unavailable",
+                    AppErrorKind::ArgoConnection,
+                )
+            })?
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -156,7 +171,10 @@ impl ArgoConnectionStore {
                 .connections
                 .lock()
                 .map_err(|_| {
-                    AppError::new("Argo CD connection state unavailable", "argoConnection")
+                    AppError::new(
+                        "Argo CD connection state unavailable",
+                        AppErrorKind::ArgoConnection,
+                    )
                 })?
                 .get(id)
                 .cloned();
@@ -166,7 +184,10 @@ impl ArgoConnectionStore {
             let _lease = old.gate.clone().lock_owned().await;
             let removed = {
                 let mut connections = self.connections.lock().map_err(|_| {
-                    AppError::new("Argo CD connection state unavailable", "argoConnection")
+                    AppError::new(
+                        "Argo CD connection state unavailable",
+                        AppErrorKind::ArgoConnection,
+                    )
                 })?;
                 if connections
                     .get(id)
@@ -224,32 +245,40 @@ struct StoredCredential {
 }
 
 trait CredentialStore {
-    fn read(&self, key: &str) -> Result<Option<String>, ()>;
-    fn write(&self, key: &str, value: &str) -> Result<(), ()>;
-    fn delete(&self, key: &str) -> Result<(), ()>;
+    fn read(&self, key: &str) -> Result<Option<String>, AppError>;
+    fn write(&self, key: &str, value: &str) -> Result<(), AppError>;
+    fn delete(&self, key: &str) -> Result<(), AppError>;
+}
+
+fn credential_error(error: keyring::Error) -> AppError {
+    AppError::new(
+        "native credential storage unavailable",
+        AppErrorKind::CredentialUnavailable,
+    )
+    .with_source(error)
 }
 
 struct KeyringCredentialStore;
 impl CredentialStore for KeyringCredentialStore {
-    fn read(&self, key: &str) -> Result<Option<String>, ()> {
-        let entry = keyring::Entry::new("KubeCove Argo CD", key).map_err(|_| ())?;
+    fn read(&self, key: &str) -> Result<Option<String>, AppError> {
+        let entry = keyring::Entry::new("KubeCove Argo CD", key).map_err(credential_error)?;
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(()),
+            Err(error) => Err(credential_error(error)),
         }
     }
-    fn write(&self, key: &str, value: &str) -> Result<(), ()> {
+    fn write(&self, key: &str, value: &str) -> Result<(), AppError> {
         keyring::Entry::new("KubeCove Argo CD", key)
-            .map_err(|_| ())?
+            .map_err(credential_error)?
             .set_password(value)
-            .map_err(|_| ())
+            .map_err(credential_error)
     }
-    fn delete(&self, key: &str) -> Result<(), ()> {
-        let entry = keyring::Entry::new("KubeCove Argo CD", key).map_err(|_| ())?;
+    fn delete(&self, key: &str) -> Result<(), AppError> {
+        let entry = keyring::Entry::new("KubeCove Argo CD", key).map_err(credential_error)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(()),
+            Err(error) => Err(credential_error(error)),
         }
     }
 }
@@ -258,12 +287,7 @@ fn load_credential(
     store: &dyn CredentialStore,
     profile: &ArgoConnectionProfile,
 ) -> Result<Option<StoredCredential>, AppError> {
-    let value = store.read(&credential_key(profile)).map_err(|()| {
-        AppError::new(
-            "native credential storage unavailable",
-            "credentialUnavailable",
-        )
-    })?;
+    let value = store.read(&credential_key(profile))?;
     let Some(value) = value else { return Ok(None) };
     let record = match serde_json::from_str::<StoredCredential>(&value) {
         Ok(record) => record,
@@ -290,18 +314,14 @@ fn save_credential(
         token: token.into(),
         generation,
     })
-    .map_err(|_| {
+    .map_err(|error| {
         AppError::new(
             "native credential storage unavailable",
-            "credentialUnavailable",
+            AppErrorKind::CredentialUnavailable,
         )
+        .with_source(error)
     })?;
-    store.write(&credential_key(profile), &value).map_err(|()| {
-        AppError::new(
-            "native credential storage unavailable",
-            "credentialUnavailable",
-        )
-    })
+    store.write(&credential_key(profile), &value)
 }
 
 fn connection_generation(
@@ -327,12 +347,7 @@ fn delete_credential(
     store: &dyn CredentialStore,
     profile: &ArgoConnectionProfile,
 ) -> Result<(), AppError> {
-    store.delete(&credential_key(profile)).map_err(|()| {
-        AppError::new(
-            "native credential storage unavailable",
-            "credentialUnavailable",
-        )
-    })
+    store.delete(&credential_key(profile))
 }
 fn unavailable_capability(
     id: String,
@@ -437,8 +452,10 @@ fn servicetunnel_capabilities(service: &Service) -> Vec<ArgoServerCapability> {
 }
 
 fn tunnel_target_unavailable(error: &AppError) -> ArgoServiceTunnelUnavailableReason {
-    match error.kind.as_str() {
-        "liveSessionTargetUnavailable" => ArgoServiceTunnelUnavailableReason::NoReadyPod,
+    match error.kind {
+        AppErrorKind::LiveSessionTargetUnavailable => {
+            ArgoServiceTunnelUnavailableReason::NoReadyPod
+        }
         _ => ArgoServiceTunnelUnavailableReason::TargetUnavailable,
     }
 }
@@ -536,7 +553,7 @@ pub async fn connect_argo_server(
         let cluster_context = profile.cluster_context.as_deref().ok_or_else(|| {
             AppError::new(
                 "clusterContext required for an Argo CD Service tunnel",
-                "argoConnection",
+                AppErrorKind::ArgoConnection,
             )
         })?;
         let started = ArgoServiceTunnel::start(
@@ -578,13 +595,13 @@ pub async fn connect_argo_server(
         let user = username.ok_or_else(|| {
             AppError::new(
                 "token or local login credentials required",
-                "argoConnection",
+                AppErrorKind::ArgoConnection,
             )
         })?;
         let password = password.ok_or_else(|| {
             AppError::new(
                 "token or local login credentials required",
-                "argoConnection",
+                AppErrorKind::ArgoConnection,
             )
         })?;
         let response = client
@@ -596,7 +613,7 @@ pub async fn connect_argo_server(
         if !response.status().is_success() {
             return Err(AppError::new(
                 format!("Argo CD login failed ({})", response.status()),
-                "argoConnection",
+                AppErrorKind::ArgoConnection,
             ));
         }
         response_json(response)
@@ -604,7 +621,12 @@ pub async fn connect_argo_server(
             .get("token")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| AppError::new("Argo CD login returned no token", "argoConnection"))?
+            .ok_or_else(|| {
+                AppError::new(
+                    "Argo CD login returned no token",
+                    AppErrorKind::ArgoConnection,
+                )
+            })?
     };
     let response = client
         .get(url(&profile.url, "/api/v1/session/userinfo")?)
@@ -615,7 +637,7 @@ pub async fn connect_argo_server(
     if !response.status().is_success() {
         return Err(AppError::new(
             format!("Argo CD session validation failed ({})", response.status()),
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     let userinfo = response_json(response).await?;
@@ -669,7 +691,12 @@ pub fn get_argo_connection_status(
     let connection = store
         .connections
         .lock()
-        .map_err(|_| AppError::new("Argo CD connection state unavailable", "argoConnection"))?
+        .map_err(|_| {
+            AppError::new(
+                "Argo CD connection state unavailable",
+                AppErrorKind::ArgoConnection,
+            )
+        })?
         .get(&id)
         .cloned();
     Ok(match connection {
@@ -763,7 +790,7 @@ pub(crate) fn inspector_from_application(
     let data = application
         .data
         .as_object()
-        .ok_or_else(|| AppError::new("invalid Application data", "serialization"))?;
+        .ok_or_else(|| AppError::new("invalid Application data", AppErrorKind::Serialization))?;
     let status = data.get("status").cloned();
     let source = status.as_ref();
     let resources: Vec<_> = source
@@ -917,7 +944,7 @@ pub(crate) async fn kubernetes_application(
     let client = client_for_context(cluster_context, kubeconfig_env_var).await?;
     let ar = find_api_resource(&client, "argoproj.io", "Application")
         .await?
-        .ok_or_else(|| AppError::new("Application CRD not found", "cluster"))?;
+        .ok_or_else(|| AppError::new("Application CRD not found", AppErrorKind::Cluster))?;
     get_crd_object(client, &ar, name, namespace).await
 }
 
@@ -952,9 +979,9 @@ pub(crate) fn connected_application_path(
     let mut path = reqwest::Url::parse("https://argo.invalid/")
         .expect("constant Argo CD API base URL is valid");
     {
-        let mut segments = path
-            .path_segments_mut()
-            .map_err(|()| AppError::new("invalid Argo CD API path", "argoConnection"))?;
+        let mut segments = path.path_segments_mut().map_err(|()| {
+            AppError::new("invalid Argo CD API path", AppErrorKind::ArgoConnection)
+        })?;
         segments.extend(["api", "v1", "applications"]).push(name);
         if managed_resources {
             segments.push("managed-resources");
@@ -986,8 +1013,9 @@ async fn connected_inspector_read(
 ) -> Result<ArgoApplicationInspector, AppError> {
     let connection = scoped_connection(
         store,
-        connection_id
-            .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?,
+        connection_id.ok_or_else(|| {
+            AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+        })?,
         cluster_context,
         application.workspace_id.as_deref(),
         kubeconfig_env_var,
@@ -1019,33 +1047,33 @@ async fn connected_inspector_read(
 }
 
 fn inspection_failure(error: &AppError) -> crate::models::ArgoInspectionFailure {
-    let kind = match error.kind.as_str() {
-        "argoApi"
-        | "argoConnection"
-        | "cancelled"
-        | "cluster"
-        | "forbidden"
-        | "kubeconfig"
-        | "network"
-        | "notFound"
-        | "providerDiscoveryUnavailable"
-        | "serialization" => error.kind.clone(),
-        _ => "inspection".into(),
-    };
-    let message = match kind.as_str() {
-        "forbidden" => "access denied",
-        "notFound" => "Application not found",
-        "cancelled" => "request cancelled",
-        "kubeconfig" => "cluster configuration unavailable",
-        "network" => "network unavailable",
-        "argoConnection" => "connection unavailable",
-        "argoApi" => "Argo CD API request failed",
-        "providerDiscoveryUnavailable" => "Application API unavailable",
-        "serialization" => "invalid response",
+    let message = match error.kind {
+        AppErrorKind::Forbidden => "access denied",
+        AppErrorKind::NotFound => "Application not found",
+        AppErrorKind::Cancelled => "request cancelled",
+        AppErrorKind::Kubeconfig => "cluster configuration unavailable",
+        AppErrorKind::Network => "network unavailable",
+        AppErrorKind::ArgoConnection => "connection unavailable",
+        AppErrorKind::ArgoApi => "Argo CD API request failed",
+        AppErrorKind::ProviderDiscoveryUnavailable => "Application API unavailable",
+        AppErrorKind::Serialization => "invalid response",
         _ => "read failed",
     };
+    let kind = match error.kind {
+        AppErrorKind::ArgoApi
+        | AppErrorKind::ArgoConnection
+        | AppErrorKind::Cancelled
+        | AppErrorKind::Cluster
+        | AppErrorKind::Forbidden
+        | AppErrorKind::Kubeconfig
+        | AppErrorKind::Network
+        | AppErrorKind::NotFound
+        | AppErrorKind::ProviderDiscoveryUnavailable
+        | AppErrorKind::Serialization => error.kind.as_str(),
+        _ => "inspection",
+    };
     crate::models::ArgoInspectionFailure {
-        kind,
+        kind: kind.into(),
         message: message.into(),
     }
 }
@@ -1069,7 +1097,7 @@ fn inspection_error(connected: &AppError, kubernetes: &AppError) -> AppError {
             "Connected inspection failed ({}) {}; Kubernetes inspection failed ({}) {}",
             connected.kind, connected.message, kubernetes.kind, kubernetes.message
         ),
-        "argoInspection",
+        AppErrorKind::ArgoInspection,
     )
 }
 
@@ -1085,7 +1113,10 @@ async fn application_inspector(
         return kubernetes_inspector(&cluster_context, &application, kubeconfig_env_var).await;
     }
     if transport != "connected" {
-        return Err(AppError::new("invalid Argo CD transport", "argoConnection"));
+        return Err(AppError::new(
+            "invalid Argo CD transport",
+            AppErrorKind::ArgoConnection,
+        ));
     }
     match connected_inspector_read(
         store,
@@ -1150,15 +1181,26 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryCredentialStore(Mutex<HashMap<String, String>>);
+    #[test]
+    fn credential_failure_keeps_native_source_private() {
+        let error = credential_error(keyring::Error::NoEntry);
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .is::<keyring::Error>());
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({"message":"native credential storage unavailable","kind":"credentialUnavailable"})
+        );
+    }
     impl CredentialStore for MemoryCredentialStore {
-        fn read(&self, key: &str) -> Result<Option<String>, ()> {
+        fn read(&self, key: &str) -> Result<Option<String>, AppError> {
             Ok(self.0.lock().unwrap().get(key).cloned())
         }
-        fn write(&self, key: &str, value: &str) -> Result<(), ()> {
+        fn write(&self, key: &str, value: &str) -> Result<(), AppError> {
             self.0.lock().unwrap().insert(key.into(), value.into());
             Ok(())
         }
-        fn delete(&self, key: &str) -> Result<(), ()> {
+        fn delete(&self, key: &str) -> Result<(), AppError> {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
@@ -1698,7 +1740,7 @@ mod tests {
         };
         let fallback = with_connected_fallback(
             inspector,
-            &AppError::new("token=plaintext", "argoConnection"),
+            &AppError::new("token=plaintext", AppErrorKind::ArgoConnection),
         );
 
         assert_eq!(fallback.transport, "kubernetes");
@@ -1714,15 +1756,15 @@ mod tests {
     fn fallback_and_combined_errors_are_sanitized() {
         let connected = AppError::new(
             "token=plaintext https://user:password@argo.example/api kubeconfig /tmp/config",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         );
-        let kubernetes = AppError::new("Secret data: plaintext", "cluster");
+        let kubernetes = AppError::new("Secret data: plaintext", AppErrorKind::Cluster);
         let fallback = inspection_failure(&connected);
         let error = inspection_error(&connected, &kubernetes);
 
         assert_eq!(fallback.kind, "argoConnection");
         assert_eq!(fallback.message, "connection unavailable");
-        assert_eq!(error.kind, "argoInspection");
+        assert_eq!(error.kind, AppErrorKind::ArgoInspection);
         assert!(error.message.contains("argoConnection"));
         assert!(error.message.contains("cluster"));
         assert!(!error.message.contains("plaintext"));

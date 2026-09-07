@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use std::{fs, io::Read};
 
 use crate::models::AppError;
@@ -24,8 +25,13 @@ pub fn save_workspace_export_json(
     };
 
     let path = file_path_to_path(file_path)?;
-    fs::write(&path, content)
-        .map_err(|err| AppError::new(format!("failed to write workspace export: {err}"), "io"))?;
+    fs::write(&path, content).map_err(|err| {
+        AppError::new(
+            format!("failed to write workspace export: {err}"),
+            AppErrorKind::Io,
+        )
+        .with_source(err)
+    })?;
     Ok(true)
 }
 
@@ -42,29 +48,41 @@ pub fn pick_workspace_import_json(app: AppHandle) -> Result<Option<String>, AppE
     };
 
     let path = file_path_to_path(file_path)?;
-    let file = fs::File::open(&path)
-        .map_err(|err| AppError::new(format!("failed to open workspace import: {err}"), "io"))?;
+    let file = fs::File::open(&path).map_err(|err| {
+        AppError::new(
+            format!("failed to open workspace import: {err}"),
+            AppErrorKind::Io,
+        )
+        .with_source(err)
+    })?;
     let mut bytes = Vec::new();
     file.take(WORKSPACE_IMPORT_MAX_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|err| AppError::new(format!("failed to read workspace import: {err}"), "io"))?;
+        .map_err(|err| {
+            AppError::new(
+                format!("failed to read workspace import: {err}"),
+                AppErrorKind::Io,
+            )
+            .with_source(err)
+        })?;
     if bytes.len() > WORKSPACE_IMPORT_MAX_BYTES as usize {
         return Err(AppError::new(
             "workspace import JSON must be 2 MiB or smaller",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
-    let content = String::from_utf8(bytes).map_err(|_| {
+    let content = String::from_utf8(bytes).map_err(|error| {
         AppError::new(
             "workspace import JSON must use UTF-8 encoding",
-            "validation",
+            AppErrorKind::Validation,
         )
+        .with_source(error)
     })?;
     Ok(Some(content))
 }
 
 fn file_path_to_path(file_path: FilePath) -> Result<std::path::PathBuf, AppError> {
-    file_path
-        .into_path()
-        .map_err(|_| AppError::new("workspace file path is not available", "io"))
+    file_path.into_path().map_err(|error| {
+        AppError::new("workspace file path is not available", AppErrorKind::Io).with_source(error)
+    })
 }

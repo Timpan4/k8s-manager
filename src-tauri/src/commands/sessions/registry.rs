@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PortForwardSessionSummary};
 use chrono::Utc;
 use std::{
@@ -58,7 +59,7 @@ impl PortForwardRegistry {
             handle.abort();
             return Err(AppError::new(
                 format!("local port {} is already forwarded", summary.local_port),
-                "liveSessionTargetUnavailable",
+                AppErrorKind::LiveSessionTargetUnavailable,
             ));
         }
         state.sessions.insert(

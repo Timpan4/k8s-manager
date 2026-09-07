@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::AppErrorKind;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -299,7 +300,7 @@ fn cancel_loading_allows_replacement_and_ignores_stale_completion() {
             .await
             .expect("join cancelled loader")
             .expect_err("loader should be cancelled");
-        assert_eq!(first_error.kind, "cancelled");
+        assert_eq!(first_error.kind, AppErrorKind::Cancelled);
         let replacement = cache
             .get_or_load(
                 "same".to_string(),

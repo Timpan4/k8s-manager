@@ -7,6 +7,7 @@ use crate::commands::{
     kubeconfig::{kubeconfig_source_key, KubeconfigSource},
     record_backend_error, record_backend_success, ClusterLiveStore,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ResourceSummary};
 use std::time::Instant;
 use tauri::State;
@@ -17,6 +18,7 @@ pub async fn resources_summary_from(
     namespace: Option<String>,
     kubeconfig_env_var: Option<String>,
 ) -> Result<Vec<ResourceSummary>, AppError> {
+    crate::commands::helpers::validate_namespace(namespace.as_deref())?;
     let source = KubeconfigSource::new(kubeconfig_env_var)?;
     let client = source.client_for_context(&cluster_context).await?;
 
@@ -46,7 +48,7 @@ pub async fn resources_summary_from(
 
     Err(AppError::new(
         format!("unsupported resource kind: {kind}"),
-        "cluster",
+        AppErrorKind::Cluster,
     ))
 }
 
@@ -93,7 +95,7 @@ pub async fn list_resources(
         }
         Err(err) => {
             eprintln!("[kubecove:backend] list_resources error context={} kind={} namespace={} error_kind={} message={} ms={}", cluster_context, kind, namespace_label, err.kind, err.message, started.elapsed().as_millis());
-            record_backend_error("list_resources", started, &err.kind);
+            record_backend_error("list_resources", started, err.kind.as_str());
         }
     }
     result

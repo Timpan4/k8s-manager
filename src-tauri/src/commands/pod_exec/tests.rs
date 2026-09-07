@@ -123,6 +123,69 @@ fn registry_lists_marks_resizes_and_stops_sessions() {
     assert!(registry.list().is_empty());
 }
 
+#[tokio::test]
+async fn stdin_is_bounded_and_acknowledged_after_write() {
+    use super::registry::{COMMAND_CAPACITY, INPUT_CHUNK_BYTES};
+    use futures_util::FutureExt;
+    let registry = PodExecRegistry::default();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
+    registry.insert(test_summary("exec-1"), sender);
+    assert!(registry
+        .write_stdin("exec-1", "x".repeat(INPUT_CHUNK_BYTES + 1))
+        .await
+        .is_err());
+    let mut write = Box::pin(registry.write_stdin("exec-1", "input".into()));
+    assert!((&mut write).now_or_never().is_none());
+    match receiver.recv().await.unwrap() {
+        ExecCommand::Stdin {
+            data, acknowledged, ..
+        } => {
+            assert_eq!(data, b"input");
+            acknowledged.send(Ok(())).unwrap();
+        }
+        ExecCommand::Resize(_) => panic!("expected stdin"),
+    }
+    assert!(write.await.is_ok());
+    for _ in 0..COMMAND_CAPACITY {
+        assert!(registry
+            .write_stdin("exec-1", "x".repeat(INPUT_CHUNK_BYTES))
+            .now_or_never()
+            .is_none());
+    }
+    assert!(registry.write_stdin("exec-1", "x".into()).await.is_err());
+    drop(receiver.recv().await.unwrap());
+    assert!(registry
+        .write_stdin("exec-1", "x".repeat(INPUT_CHUNK_BYTES))
+        .now_or_never()
+        .is_none());
+}
+
+#[tokio::test]
+async fn stdin_reports_closed_session_instead_of_success() {
+    use super::registry::COMMAND_CAPACITY;
+    use futures_util::FutureExt;
+    let registry = PodExecRegistry::default();
+    let (sender, receiver) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
+    registry.insert(test_summary("exec-1"), sender);
+    let mut write = Box::pin(registry.write_stdin("exec-1", "input".into()));
+    assert!((&mut write).now_or_never().is_none());
+    drop(receiver);
+    assert!(write.await.is_err());
+}
+
+#[test]
+fn exact_argv_preserves_whitespace_and_empty_arguments() {
+    let mut request = valid_request();
+    request.command = vec![
+        "/bin/printf".into(),
+        "%s".into(),
+        " a ".into(),
+        String::new(),
+    ];
+    request.confirmation.command = serde_json::to_string(&request.command).unwrap();
+    assert_eq!(validate_request(&request).unwrap().command, request.command);
+}
+
 #[test]
 fn registry_stops_sessions_outside_context_or_source_scope() {
     let registry = PodExecRegistry::default();

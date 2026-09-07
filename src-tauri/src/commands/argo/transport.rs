@@ -1,4 +1,5 @@
 use super::connected::ConnectedArgo;
+use crate::models::AppErrorKind;
 use crate::models::{normalize_service_tunnel_endpoint, AppError, ArgoServerEndpoint};
 use futures_util::StreamExt;
 use reqwest::{Certificate, Client as HttpClient};
@@ -56,7 +57,9 @@ pub(crate) async fn api_delete(connection: &ConnectedArgo, path: &str) -> Result
 
 pub(super) async fn response_json(response: reqwest::Response) -> Result<Value, AppError> {
     let bytes = capped_response_bytes(response).await?;
-    serde_json::from_slice(&bytes).map_err(|_| AppError::new("invalid Argo CD response", "argoApi"))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::new("invalid Argo CD response", AppErrorKind::ArgoApi).with_source(error)
+    })
 }
 
 async fn api_status_error(response: reqwest::Response) -> AppError {
@@ -77,7 +80,7 @@ async fn api_status_error(response: reqwest::Response) -> AppError {
             || format!("Argo CD API request failed ({status})"),
             |message| format!("Argo CD API request failed ({status}): {message}"),
         ),
-        "argoApi",
+        AppErrorKind::ArgoApi,
     )
 }
 
@@ -88,7 +91,7 @@ async fn capped_response_bytes(response: reqwest::Response) -> Result<Vec<u8>, A
     {
         return Err(AppError::new(
             "Argo CD response exceeded size limit",
-            "argoApi",
+            AppErrorKind::ArgoApi,
         ));
     }
     let mut bytes = Vec::new();
@@ -103,7 +106,7 @@ fn push_capped_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> Result<(), AppError> 
     if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
         return Err(AppError::new(
             "Argo CD response exceeded size limit",
-            "argoApi",
+            AppErrorKind::ArgoApi,
         ));
     }
     bytes.extend_from_slice(chunk);
@@ -147,7 +150,7 @@ pub(crate) fn redact_secret_fields(value: &mut Value) {
 pub(super) fn safe_http_error(error: reqwest::Error) -> AppError {
     AppError::new(
         format!("Argo CD request failed: {}", error.without_url()),
-        "argoConnection",
+        AppErrorKind::ArgoConnection,
     )
 }
 
@@ -168,8 +171,9 @@ pub(super) fn http_client(
         builder = builder.danger_accept_invalid_certs(true);
     }
     if let Some(pem) = custom_ca_pem {
-        let certificate = Certificate::from_pem(&pem)
-            .map_err(|_| AppError::new("invalid custom CA", "argoConnection"))?;
+        let certificate = Certificate::from_pem(&pem).map_err(|error| {
+            AppError::new("invalid custom CA", AppErrorKind::ArgoConnection).with_source(error)
+        })?;
         builder = builder.add_root_certificate(certificate);
     }
     builder.build().map_err(safe_http_error)
@@ -211,19 +215,26 @@ pub(super) fn url(base: &str, path: &str) -> Result<String, AppError> {
     }
     base.join(path.trim_start_matches('/'))
         .map(|value| value.to_string())
-        .map_err(|_| AppError::new("invalid Argo CD API path", "argoConnection"))
+        .map_err(|error| {
+            AppError::new("invalid Argo CD API path", AppErrorKind::ArgoConnection)
+                .with_source(error)
+        })
 }
 
 pub(super) fn argo_url(value: &str) -> Result<reqwest::Url, AppError> {
-    let mut base = reqwest::Url::parse(value.trim())
-        .map_err(|_| AppError::new("invalid Argo CD URL", "argoConnection"))?;
+    let mut base = reqwest::Url::parse(value.trim()).map_err(|error| {
+        AppError::new("invalid Argo CD URL", AppErrorKind::ArgoConnection).with_source(error)
+    })?;
     if !matches!(base.scheme(), "http" | "https") {
-        return Err(AppError::new("invalid Argo CD URL", "argoConnection"));
+        return Err(AppError::new(
+            "invalid Argo CD URL",
+            AppErrorKind::ArgoConnection,
+        ));
     }
     if !base.username().is_empty() || base.password().is_some() {
         return Err(AppError::new(
             "Argo CD URL must not contain credentials",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     base.set_query(None);
@@ -232,18 +243,19 @@ pub(super) fn argo_url(value: &str) -> Result<reqwest::Url, AppError> {
 }
 
 pub(super) fn canonical_url(value: &str) -> Result<reqwest::Url, AppError> {
-    let mut base = reqwest::Url::parse(value.trim())
-        .map_err(|_| AppError::new("invalid Argo CD URL", "argoConnection"))?;
+    let mut base = reqwest::Url::parse(value.trim()).map_err(|error| {
+        AppError::new("invalid Argo CD URL", AppErrorKind::ArgoConnection).with_source(error)
+    })?;
     if base.scheme() != "https" {
         return Err(AppError::new(
             "Argo CD URL must use HTTPS",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     if !base.username().is_empty() || base.password().is_some() {
         return Err(AppError::new(
             "Argo CD URL must not contain credentials",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     base.set_query(None);

@@ -2,6 +2,7 @@ use crate::commands::helpers::{
     base_resource_summary, fetch_and_serialize_cluster, k8s_creation_timestamp_to_rfc3339,
     resource_age, update_resource_health,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ResourceDetailsFull, ResourceHealth, ResourceSummary};
 use chrono::{TimeZone, Utc};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -16,7 +17,7 @@ pub(super) async fn node_details(
     let (node, yaml) =
         fetch_and_serialize_cluster::<k8s_openapi::api::core::v1::Node>(client, &name).await?;
     let metadata = serde_json::to_value(&node.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = node
         .status
         .as_ref()
@@ -85,7 +86,7 @@ pub(super) async fn storageclass_details(
         fetch_and_serialize_cluster::<k8s_openapi::api::storage::v1::StorageClass>(client, &name)
             .await?;
     let metadata = serde_json::to_value(&sc.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let summary = ResourceSummary {
         kind: "StorageClass".to_string(),
         cluster: cluster_context.clone(),
@@ -132,7 +133,7 @@ pub(super) async fn pv_details(
         fetch_and_serialize_cluster::<k8s_openapi::api::core::v1::PersistentVolume>(client, &name)
             .await?;
     let metadata = serde_json::to_value(&pv.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = pv
         .status
         .as_ref()
@@ -183,7 +184,7 @@ pub(super) async fn crd_details(
     let (crd, yaml) =
         fetch_and_serialize_cluster::<CustomResourceDefinition>(client, &name).await?;
     let metadata = serde_json::to_value(&crd.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = crd
         .status
         .as_ref()

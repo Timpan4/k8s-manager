@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 mod cluster;
 mod core;
 mod workloads;
@@ -48,7 +49,7 @@ pub async fn resource_details_from(
         }
         _ => Err(AppError::new(
             format!("unsupported resource kind: {kind}"),
-            "cluster",
+            AppErrorKind::Cluster,
         )),
     }
 }
@@ -88,7 +89,7 @@ pub async fn get_resource_details(
         Ok(details) => {
             eprintln!("[kubecove:backend] get_resource_details done context={} kind={} namespace={} name={} yaml_bytes={} status={} ms={}", cluster_context, kind, namespace_label, name, details.yaml.len(), details.status.is_some(), started.elapsed().as_millis());
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!("[kubecove:backend] get_resource_details cancelled context={} kind={} namespace={} name={} ms={}", cluster_context, kind, namespace_label, name, started.elapsed().as_millis());
         }
         Err(err) => {

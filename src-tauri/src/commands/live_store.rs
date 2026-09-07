@@ -1,8 +1,8 @@
+use crate::commands::helpers::FluxOwnershipIndex;
 use crate::models::{
     AppError, DiscoveredResourceKind, NamespaceSummary, ResourceSummary, ResourceTopology,
     WatchResourceKind,
 };
-use crate::commands::helpers::FluxOwnershipIndex;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use std::{
     collections::HashMap,

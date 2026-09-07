@@ -1,4 +1,5 @@
 use crate::commands::flux::FLUX_KINDS;
+use crate::models::AppErrorKind;
 use crate::models::{AppError, GitOpsOwnerSummary, ResourceSummary};
 use kube::{
     api::{Api, ApiResource, DynamicObject, ListParams},
@@ -105,7 +106,7 @@ pub(crate) async fn fetch_flux_ownership_index(
                 }
                 Err(e) => {
                     let error = AppError::from(e);
-                    if error.kind == "cancelled" {
+                    if error.kind == AppErrorKind::Cancelled {
                         return Err(error);
                     }
                     index.partial = true;
@@ -289,13 +290,13 @@ mod tests {
         let read = read_flux_ownership_index(client, &[]);
         let respond = async move {
             let (_, send) = handle.next_request().await.expect("Kustomization request");
-            send.send_error(std::io::Error::other("workspace request cancelled"));
+            send.send_error(crate::models::WorkspaceRequestCancelled);
         };
 
         let (result, ()) = tokio::join!(read, respond);
         assert_eq!(
             result.expect_err("cancellation should be fatal").kind,
-            "cancelled"
+            AppErrorKind::Cancelled
         );
     }
 

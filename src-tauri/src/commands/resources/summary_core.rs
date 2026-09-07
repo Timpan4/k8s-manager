@@ -30,7 +30,7 @@ pub(super) async fn core_resource_summaries(
             };
             api.list(&list_params())
                 .await
-                .map_err(|e| AppError::kube(e.to_string()))?
+                .map_err(AppError::from)?
                 .iter()
                 .map(|pod| {
                     let mut summary = base_resource_summary(
@@ -46,13 +46,9 @@ pub(super) async fn core_resource_summaries(
                             .as_ref()
                             .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
                             .map(|c| c.status.clone());
-                        let restarts: i32 = status
-                            .container_statuses
-                            .as_ref()
-                            .map_or(0, |cs| cs.iter().map(|c| c.restart_count).sum());
-                        if restarts > 0 {
-                            summary.restarts = Some(restarts);
-                        }
+                        summary.restarts = crate::commands::helpers::pod_restarts(
+                            status.container_statuses.as_deref(),
+                        );
                     }
                     update_resource_health(&mut summary);
                     summary
@@ -67,7 +63,7 @@ pub(super) async fn core_resource_summaries(
             };
             api.list(&list_params())
                 .await
-                .map_err(|e| AppError::kube(e.to_string()))?
+                .map_err(AppError::from)?
                 .iter()
                 .map(|svc| {
                     base_resource_summary(
@@ -87,7 +83,7 @@ pub(super) async fn core_resource_summaries(
             };
             api.list(&list_params())
                 .await
-                .map_err(|e| AppError::kube(e.to_string()))?
+                .map_err(AppError::from)?
                 .iter()
                 .map(|cm| {
                     base_resource_summary(
@@ -107,7 +103,7 @@ pub(super) async fn core_resource_summaries(
             };
             api.list(&list_params())
                 .await
-                .map_err(|e| AppError::kube(e.to_string()))?
+                .map_err(AppError::from)?
                 .iter()
                 .map(|sec| {
                     base_resource_summary(
@@ -128,7 +124,7 @@ pub(super) async fn core_resource_summaries(
                 };
             api.list(&list_params())
                 .await
-                .map_err(|e| AppError::kube(e.to_string()))?
+                .map_err(AppError::from)?
                 .iter()
                 .map(|pvc| {
                     base_resource_summary(

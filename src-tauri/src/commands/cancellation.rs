@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::models::AppErrorKind;
 use crate::{
     commands::{helpers::client_cache, ArgoConnectionStore, ClusterLiveStore},
     models::{AppError, CancelBackendRequestsResult, CancelWorkspaceRequestsResult},
@@ -249,7 +251,7 @@ mod tests {
         let (result, ()) = tokio::join!(waiting, cancellation);
 
         let error = result.expect_err("pending request should be cancelled");
-        assert_eq!(error.kind, "cancelled");
+        assert_eq!(error.kind, AppErrorKind::Cancelled);
     }
 
     #[tokio::test]

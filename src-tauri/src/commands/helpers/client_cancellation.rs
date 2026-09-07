@@ -35,9 +35,7 @@ pub(crate) struct RequestCancellationService<S> {
     token: CancellationToken,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("workspace request cancelled")]
-pub(crate) struct WorkspaceRequestCancelled;
+use crate::models::WorkspaceRequestCancelled;
 
 impl<S, B> Service<http::Request<Body>> for RequestCancellationService<S>
 where

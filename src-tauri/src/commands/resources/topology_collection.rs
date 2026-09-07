@@ -106,7 +106,7 @@ where
             Err(error) if is_optional_topology_list_error(&error) => {
                 push_topology_list_warning::<T>(warnings, None, &error);
             }
-            Err(error) => return Err(AppError::kube(error.to_string())),
+            Err(error) => return Err(AppError::from(error)),
         }
         return Ok(out);
     }
@@ -130,7 +130,7 @@ where
             Err(error) if is_optional_topology_list_error(&error) => {
                 push_topology_list_warning::<T>(warnings, Some(&namespace), &error);
             }
-            Err(error) => return Err(AppError::kube(error.to_string())),
+            Err(error) => return Err(AppError::from(error)),
         }
     }
     Ok(out)
@@ -487,15 +487,8 @@ fn pod_input(cluster_context: &str, pod: Pod) -> TopologyInputResource {
             .as_ref()
             .and_then(|conds| conds.iter().find(|condition| condition.type_ == "Ready"))
             .map(|condition| condition.status.clone());
-        let restarts: i32 = status.container_statuses.as_ref().map_or(0, |statuses| {
-            statuses
-                .iter()
-                .map(|container| container.restart_count)
-                .sum()
-        });
-        if restarts > 0 {
-            input.summary.restarts = Some(restarts);
-        }
+        input.summary.restarts =
+            crate::commands::helpers::pod_restarts(status.container_statuses.as_deref());
     }
     update_resource_health(&mut input.summary);
     input

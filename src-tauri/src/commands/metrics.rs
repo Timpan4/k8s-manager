@@ -3,6 +3,7 @@ use crate::commands::{
     diagnostic_field, helpers::list_params, kubeconfig::KubeconfigSource,
     BackendCancellationRegistry,
 };
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, ResourceMetricSummary, ResourceMetricsAvailability,
     ResourceMetricsAvailabilityStatus, ResourceMetricsSummary,
@@ -56,7 +57,7 @@ async fn has_metrics_api(client: Client) -> Result<bool, AppError> {
     let discovery = Discovery::new(client)
         .run_aggregated()
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?;
+        .map_err(AppError::from)?;
     let available = discovery.groups().any(|group| {
         group.name() == "metrics.k8s.io"
             && group
@@ -72,8 +73,7 @@ async fn has_metrics_api(client: Client) -> Result<bool, AppError> {
 }
 
 fn classify_metrics_error(error: &Error) -> MetricsListStatus {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("forbidden") || message.contains("403") {
+    if crate::models::kube_error_kind(error) == AppErrorKind::Forbidden {
         MetricsListStatus::Forbidden
     } else {
         MetricsListStatus::Unavailable
@@ -81,43 +81,48 @@ fn classify_metrics_error(error: &Error) -> MetricsListStatus {
 }
 
 fn parse_cpu_millicores(value: &str) -> Option<f64> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(raw) = trimmed.strip_suffix('n') {
-        return raw.parse::<f64>().ok().map(|n| n / 1_000_000.0);
-    }
-    if let Some(raw) = trimmed.strip_suffix('u') {
-        return raw.parse::<f64>().ok().map(|u| u / 1_000.0);
-    }
-    if let Some(raw) = trimmed.strip_suffix('m') {
-        return raw.parse::<f64>().ok();
-    }
-    trimmed.parse::<f64>().ok().map(|cores| cores * 1_000.0)
+    let value = value.trim();
+    let (number, multiplier) = if let Some(raw) = value.strip_suffix('n') {
+        (raw, 1.0 / 1_000_000.0)
+    } else if let Some(raw) = value.strip_suffix('u') {
+        (raw, 1.0 / 1_000.0)
+    } else if let Some(raw) = value.strip_suffix('m') {
+        (raw, 1.0)
+    } else {
+        (value, 1_000.0)
+    };
+    let millicores = number.parse::<f64>().ok()? * multiplier;
+    (millicores.is_finite() && millicores >= 0.0).then_some(millicores)
 }
 
 fn parse_memory_bytes(value: &str) -> Option<i64> {
-    const UNITS: &[(&str, i64)] = &[
-        ("Ki", 1024),
-        ("Mi", 1024 * 1024),
-        ("Gi", 1024 * 1024 * 1024),
-        ("Ti", 1024_i64.pow(4)),
-        ("K", 1000),
-        ("M", 1000 * 1000),
-        ("G", 1000 * 1000 * 1000),
-        ("T", 1000_i64.pow(4)),
+    const UNITS: &[(&str, f64)] = &[
+        ("Ki", 1024.0),
+        ("Mi", 1_048_576.0),
+        ("Gi", 1_073_741_824.0),
+        ("Ti", 1_099_511_627_776.0),
+        ("K", 1000.0),
+        ("M", 1_000_000.0),
+        ("G", 1_000_000_000.0),
+        ("T", 1_000_000_000_000.0),
     ];
     let trimmed = value.trim();
     for (suffix, multiplier) in UNITS {
         if let Some(raw) = trimmed.strip_suffix(suffix) {
-            return raw
-                .parse::<f64>()
-                .ok()
-                .map(|number| (number * *multiplier as f64).round() as i64);
+            let quantity = raw.parse::<f64>().ok()?;
+            if !quantity.is_finite() || quantity < 0.0 {
+                return None;
+            }
+            let bytes = (quantity * multiplier).round();
+            // i64::MAX rounds up to 2^63 as f64, so the upper bound is exclusive.
+            return if bytes.is_finite() && bytes >= 0.0 && bytes < i64::MAX as f64 {
+                Some(bytes as i64)
+            } else {
+                None
+            };
         }
     }
-    trimmed.parse::<i64>().ok()
+    trimmed.parse::<i64>().ok().filter(|bytes| *bytes >= 0)
 }
 
 fn usage_value(data: &Value, key: &str) -> Option<String> {
@@ -133,27 +138,32 @@ fn container_usage_totals(data: &Value) -> (Option<f64>, Option<i64>) {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let mut cpu = 0.0;
+    let mut cpu = Some(0.0_f64);
     let mut has_cpu = false;
-    let mut memory = 0_i64;
+    let mut memory = Some(0_i64);
     let mut has_memory = false;
 
     for container in containers {
         if let Some(value) =
             usage_value(container, "cpu").and_then(|value| parse_cpu_millicores(&value))
         {
-            cpu += value;
+            cpu = cpu
+                .map(|total| total + value)
+                .filter(|total| total.is_finite());
             has_cpu = true;
         }
         if let Some(value) =
             usage_value(container, "memory").and_then(|value| parse_memory_bytes(&value))
         {
-            memory += value;
+            memory = memory.and_then(|total| total.checked_add(value));
             has_memory = true;
         }
     }
 
-    (has_cpu.then_some(cpu), has_memory.then_some(memory))
+    (
+        has_cpu.then_some(cpu).flatten(),
+        has_memory.then_some(memory).flatten(),
+    )
 }
 
 fn metric_from_object(
@@ -232,7 +242,7 @@ async fn list_pods(client: Client, namespaces: &[String]) -> Result<Vec<Pod>, Ap
             .list(&list_params())
             .await
             .map(|list| list.items)
-            .map_err(|e| AppError::kube(e.to_string()));
+            .map_err(AppError::from);
     }
     let outcomes = stream::iter(namespaces.to_vec())
         .map(|namespace| {
@@ -243,7 +253,7 @@ async fn list_pods(client: Client, namespaces: &[String]) -> Result<Vec<Pod>, Ap
         .collect::<Vec<_>>()
         .await;
     for outcome in outcomes {
-        out.extend(outcome.map_err(|e| AppError::kube(e.to_string()))?.items);
+        out.extend(outcome.map_err(AppError::from)?.items);
     }
     Ok(out)
 }
@@ -259,7 +269,7 @@ async fn list_replicasets(
             .list(&list_params())
             .await
             .map(|list| list.items)
-            .map_err(|e| AppError::kube(e.to_string()));
+            .map_err(AppError::from);
     }
     let outcomes = stream::iter(namespaces.to_vec())
         .map(|namespace| {
@@ -270,7 +280,7 @@ async fn list_replicasets(
         .collect::<Vec<_>>()
         .await;
     for outcome in outcomes {
-        out.extend(outcome.map_err(|e| AppError::kube(e.to_string()))?.items);
+        out.extend(outcome.map_err(AppError::from)?.items);
     }
     Ok(out)
 }
@@ -286,17 +296,24 @@ fn controller_owner(
         .or_else(|| owners.first())
 }
 
+struct WorkloadMetric {
+    summary: ResourceMetricSummary,
+    cpu_overflowed: bool,
+    memory_overflowed: bool,
+}
+
 fn add_workload_metric(
-    by_workload: &mut BTreeMap<WorkloadKey, ResourceMetricSummary>,
+    by_workload: &mut BTreeMap<WorkloadKey, WorkloadMetric>,
     cluster_context: &str,
     key: WorkloadKey,
     pod_name: &str,
     metric: &ResourceMetricSummary,
 ) {
     let (kind, namespace, name) = key.clone();
-    let entry = by_workload
-        .entry(key)
-        .or_insert_with(|| ResourceMetricSummary {
+    let entry = by_workload.entry(key).or_insert_with(|| WorkloadMetric {
+        cpu_overflowed: false,
+        memory_overflowed: false,
+        summary: ResourceMetricSummary {
             kind,
             cluster: cluster_context.to_string(),
             name,
@@ -305,17 +322,26 @@ fn add_workload_metric(
             memory_bytes: None,
             sampled_at: metric.sampled_at.clone(),
             source_pods: Vec::new(),
-        });
-    if let Some(cpu) = metric.cpu_millicores {
-        entry.cpu_millicores = Some(entry.cpu_millicores.unwrap_or(0.0) + cpu);
+        },
+    });
+    if !entry.cpu_overflowed {
+        if let Some(cpu) = metric.cpu_millicores {
+            let total = entry.summary.cpu_millicores.unwrap_or(0.0) + cpu;
+            entry.summary.cpu_millicores = total.is_finite().then_some(total);
+            entry.cpu_overflowed = entry.summary.cpu_millicores.is_none();
+        }
     }
-    if let Some(memory) = metric.memory_bytes {
-        entry.memory_bytes = Some(entry.memory_bytes.unwrap_or(0) + memory);
+    if !entry.memory_overflowed {
+        if let Some(memory) = metric.memory_bytes {
+            entry.summary.memory_bytes =
+                entry.summary.memory_bytes.unwrap_or(0).checked_add(memory);
+            entry.memory_overflowed = entry.summary.memory_bytes.is_none();
+        }
     }
-    if metric.sampled_at > entry.sampled_at {
-        entry.sampled_at.clone_from(&metric.sampled_at);
+    if metric.sampled_at > entry.summary.sampled_at {
+        entry.summary.sampled_at.clone_from(&metric.sampled_at);
     }
-    entry.source_pods.push(pod_name.to_string());
+    entry.summary.source_pods.push(pod_name.to_string());
 }
 
 fn aggregate_workload_metrics(
@@ -340,7 +366,7 @@ fn aggregate_workload_metrics(
             ))
         })
         .collect();
-    let mut by_workload: BTreeMap<WorkloadKey, ResourceMetricSummary> = BTreeMap::new();
+    let mut by_workload: BTreeMap<WorkloadKey, WorkloadMetric> = BTreeMap::new();
 
     for pod in pods {
         let namespace = pod.metadata.namespace.clone().unwrap_or_default();
@@ -376,7 +402,10 @@ fn aggregate_workload_metrics(
         }
     }
 
-    by_workload.into_values().collect()
+    by_workload
+        .into_values()
+        .map(|metric| metric.summary)
+        .collect()
 }
 
 fn availability(
@@ -394,6 +423,9 @@ pub async fn resource_metrics_from(
     namespaces: Vec<String>,
     kubeconfig_env_var: Option<String>,
 ) -> Result<ResourceMetricsSummary, AppError> {
+    for namespace in &namespaces {
+        crate::commands::helpers::validate_namespace(Some(namespace))?;
+    }
     let client = client_for_context(&cluster_context, kubeconfig_env_var).await?;
     match has_metrics_api(client.clone()).await {
         Ok(true) => {}
@@ -411,8 +443,7 @@ pub async fn resource_metrics_from(
             });
         }
         Err(err) => {
-            let forbidden = err.message.to_ascii_lowercase().contains("forbidden")
-                || err.message.contains("403");
+            let forbidden = err.kind == AppErrorKind::Forbidden;
             return Ok(ResourceMetricsSummary {
                 cluster: cluster_context,
                 availability: availability(
@@ -439,8 +470,9 @@ pub async fn resource_metrics_from(
     let node_result = list_node_metric_objects(client.clone()).await;
     let mut warnings = Vec::new();
     let mut had_unavailable_error = false;
+    let mut had_forbidden_error = pod_result.failures.contains(&MetricsListStatus::Forbidden);
 
-    if pod_result.failures.contains(&MetricsListStatus::Forbidden) {
+    if had_forbidden_error {
         warnings.push("Pod metrics forbidden".to_string());
     }
     if pod_result
@@ -462,6 +494,7 @@ pub async fn resource_metrics_from(
             .collect(),
         Err(status) => {
             if status == MetricsListStatus::Forbidden {
+                had_forbidden_error = true;
                 warnings.push("Node metrics forbidden".to_string());
             } else {
                 had_unavailable_error = true;
@@ -490,7 +523,7 @@ pub async fn resource_metrics_from(
         }
     };
     let status = if pods.is_empty() && nodes.is_empty() {
-        if warnings.iter().any(|warning| warning.contains("forbidden")) {
+        if had_forbidden_error {
             ResourceMetricsAvailabilityStatus::Forbidden
         } else if had_unavailable_error {
             ResourceMetricsAvailabilityStatus::Unavailable
@@ -550,7 +583,7 @@ pub async fn list_resource_metrics(
                 started.elapsed().as_millis()
             );
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!(
                 "[kubecove:backend] list_resource_metrics cancelled context={} ms={}",
                 cluster_context,
@@ -580,156 +613,5 @@ pub async fn list_resource_metrics(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-    use serde_json::json;
-
-    #[test]
-    fn parses_metrics_quantities() {
-        assert_eq!(parse_cpu_millicores("250m"), Some(250.0));
-        assert_eq!(parse_cpu_millicores("1"), Some(1000.0));
-        assert_eq!(parse_cpu_millicores("125000000n"), Some(125.0));
-        assert_eq!(parse_memory_bytes("64Mi"), Some(67_108_864));
-        assert_eq!(parse_memory_bytes("1536Ki"), Some(1_572_864));
-    }
-
-    #[test]
-    fn normalizes_pod_metrics_from_container_usage() {
-        let resource = metrics_api_resource("PodMetrics", "pods");
-        let object = DynamicObject::new("api-0", &resource)
-            .within("payments")
-            .data(json!({
-                "timestamp": "2026-05-22T12:00:00Z",
-                "containers": [
-                    { "name": "api", "usage": { "cpu": "150m", "memory": "64Mi" } },
-                    { "name": "sidecar", "usage": { "cpu": "50000000n", "memory": "8Mi" } }
-                ]
-            }));
-
-        let metric = metric_from_object("kind-dev", "Pod", &object);
-
-        assert_eq!(metric.kind, "Pod");
-        assert_eq!(metric.namespace.as_deref(), Some("payments"));
-        assert_eq!(metric.cpu_millicores, Some(200.0));
-        assert_eq!(metric.memory_bytes, Some(75_497_472));
-        assert_eq!(metric.sampled_at.as_deref(), Some("2026-05-22T12:00:00Z"));
-    }
-
-    #[test]
-    fn aggregates_workload_metrics_from_owned_pods() {
-        let mut pod = Pod::default();
-        pod.metadata.name = Some("api-0".to_string());
-        pod.metadata.namespace = Some("payments".to_string());
-        pod.metadata.owner_references = Some(vec![OwnerReference {
-            api_version: "apps/v1".to_string(),
-            kind: "ReplicaSet".to_string(),
-            name: "api-7d9".to_string(),
-            uid: "rs-1".to_string(),
-            controller: Some(true),
-            block_owner_deletion: None,
-        }]);
-        let pod_metric = ResourceMetricSummary {
-            kind: "Pod".to_string(),
-            cluster: "kind-dev".to_string(),
-            name: "api-0".to_string(),
-            namespace: Some("payments".to_string()),
-            cpu_millicores: Some(125.0),
-            memory_bytes: Some(128),
-            sampled_at: Some("2026-05-22T12:00:00Z".to_string()),
-            source_pods: Vec::new(),
-        };
-
-        let workloads = aggregate_workload_metrics("kind-dev", &[pod], &[], &[pod_metric]);
-
-        assert_eq!(workloads.len(), 1);
-        assert_eq!(workloads[0].kind, "ReplicaSet");
-        assert_eq!(workloads[0].name, "api-7d9");
-        assert_eq!(workloads[0].cpu_millicores, Some(125.0));
-        assert_eq!(workloads[0].source_pods, vec!["api-0"]);
-    }
-
-    #[test]
-    fn rolls_up_replicaset_metrics_to_deployment_owner() {
-        let mut pod = Pod::default();
-        pod.metadata.name = Some("api-0".to_string());
-        pod.metadata.namespace = Some("payments".to_string());
-        pod.metadata.owner_references = Some(vec![OwnerReference {
-            api_version: "apps/v1".to_string(),
-            kind: "ReplicaSet".to_string(),
-            name: "api-7d9".to_string(),
-            uid: "rs-1".to_string(),
-            controller: Some(true),
-            block_owner_deletion: None,
-        }]);
-        let mut replicaset = ReplicaSet::default();
-        replicaset.metadata.name = Some("api-7d9".to_string());
-        replicaset.metadata.namespace = Some("payments".to_string());
-        replicaset.metadata.owner_references = Some(vec![OwnerReference {
-            api_version: "apps/v1".to_string(),
-            kind: "Deployment".to_string(),
-            name: "api".to_string(),
-            uid: "deploy-1".to_string(),
-            controller: Some(true),
-            block_owner_deletion: None,
-        }]);
-        let pod_metric = ResourceMetricSummary {
-            kind: "Pod".to_string(),
-            cluster: "kind-dev".to_string(),
-            name: "api-0".to_string(),
-            namespace: Some("payments".to_string()),
-            cpu_millicores: Some(125.0),
-            memory_bytes: Some(128),
-            sampled_at: Some("2026-05-22T12:00:00Z".to_string()),
-            source_pods: Vec::new(),
-        };
-
-        let workloads =
-            aggregate_workload_metrics("kind-dev", &[pod], &[replicaset], &[pod_metric]);
-
-        assert_eq!(workloads.len(), 2);
-        let deployment = workloads
-            .iter()
-            .find(|metric| metric.kind == "Deployment" && metric.name == "api")
-            .expect("deployment rollup");
-        let replicaset = workloads
-            .iter()
-            .find(|metric| metric.kind == "ReplicaSet" && metric.name == "api-7d9")
-            .expect("replicaset rollup");
-        assert_eq!(deployment.cpu_millicores, Some(125.0));
-        assert_eq!(deployment.memory_bytes, Some(128));
-        assert_eq!(replicaset.cpu_millicores, Some(125.0));
-        assert_eq!(replicaset.memory_bytes, Some(128));
-    }
-
-    #[test]
-    fn leaves_workload_metrics_empty_when_pod_sample_has_no_usage() {
-        let mut pod = Pod::default();
-        pod.metadata.name = Some("api-0".to_string());
-        pod.metadata.namespace = Some("payments".to_string());
-        pod.metadata.owner_references = Some(vec![OwnerReference {
-            api_version: "apps/v1".to_string(),
-            kind: "StatefulSet".to_string(),
-            name: "api".to_string(),
-            uid: "sts-1".to_string(),
-            controller: Some(true),
-            block_owner_deletion: None,
-        }]);
-        let pod_metric = ResourceMetricSummary {
-            kind: "Pod".to_string(),
-            cluster: "kind-dev".to_string(),
-            name: "api-0".to_string(),
-            namespace: Some("payments".to_string()),
-            cpu_millicores: None,
-            memory_bytes: None,
-            sampled_at: Some("2026-05-22T12:00:00Z".to_string()),
-            source_pods: Vec::new(),
-        };
-
-        let workloads = aggregate_workload_metrics("kind-dev", &[pod], &[], &[pod_metric]);
-
-        assert_eq!(workloads.len(), 1);
-        assert_eq!(workloads[0].cpu_millicores, None);
-        assert_eq!(workloads[0].memory_bytes, None);
-    }
-}
+#[path = "metrics_tests.rs"]
+mod tests;

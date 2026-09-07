@@ -1,4 +1,5 @@
 use crate::commands::helpers::{list_params, serialize_resource_document};
+use crate::models::AppErrorKind;
 use crate::{commands::kubeconfig::KubeconfigSource, models::AppError};
 use kube::{
     api::{Api, ApiResource, DynamicObject},
@@ -21,7 +22,7 @@ pub(crate) async fn discover_api_resources(client: &Client) -> Result<Vec<ApiRes
     let discovery = Discovery::new(client.clone())
         .run_aggregated()
         .await
-        .map_err(|err| AppError::kube(err.to_string()))?;
+        .map_err(AppError::from)?;
     let mut resources = Vec::new();
     for group in discovery.groups() {
         for (api_resource, _) in group.recommended_resources() {
@@ -55,11 +56,12 @@ pub(crate) async fn list_crd_objects(
     client: Client,
     api_resource: &ApiResource,
 ) -> Result<Vec<DynamicObject>, AppError> {
+    crate::commands::helpers::validate_api_resource(api_resource)?;
     Api::<DynamicObject>::all_with(client, api_resource)
         .list(&list_params())
         .await
         .map(|list| list.items)
-        .map_err(|err| AppError::kube(err.to_string()))
+        .map_err(AppError::from)
 }
 
 pub(crate) async fn get_crd_object(
@@ -68,10 +70,13 @@ pub(crate) async fn get_crd_object(
     name: &str,
     namespace: Option<&str>,
 ) -> Result<DynamicObject, AppError> {
+    crate::commands::helpers::validate_namespace(namespace)?;
+    crate::commands::helpers::validate_path_segment(name, "resource name")?;
+    crate::commands::helpers::validate_api_resource(api_resource)?;
     dynamic_api(client, api_resource, namespace)
         .get(name)
         .await
-        .map_err(|err| AppError::kube(err.to_string()))
+        .map_err(AppError::from)
 }
 
 fn dynamic_api(
@@ -99,7 +104,7 @@ pub(crate) fn resource_yaml(
 
 pub(crate) fn resource_metadata(object: &DynamicObject) -> Result<Value, AppError> {
     serde_json::to_value(&object.metadata)
-        .map_err(|err| AppError::new(err.to_string(), "serialization"))
+        .map_err(|err| AppError::new(err.to_string(), AppErrorKind::Serialization).with_source(err))
 }
 
 pub(crate) fn resource_status(object: &DynamicObject) -> Option<Value> {

@@ -1,5 +1,6 @@
 use crate::commands::helpers::k8s_creation_timestamp_to_rfc3339;
 use crate::commands::kubeconfig::KubeconfigSource;
+use crate::models::AppErrorKind;
 use crate::models::{AppError, DeploymentRevision};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use kube::api::ListParams;
@@ -25,16 +26,19 @@ async fn deployment_revisions_from(
     deployment_name: &str,
     namespace: &str,
 ) -> Result<Vec<DeploymentRevision>, AppError> {
+    crate::commands::helpers::validate_namespace(Some(namespace))?;
+    crate::commands::helpers::validate_path_segment(deployment_name, "Deployment name")?;
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let deployment = deployments
         .get(deployment_name)
         .await
         .map_err(AppError::from)?;
-    let deployment_uid = deployment
-        .metadata
-        .uid
-        .as_deref()
-        .ok_or_else(|| AppError::new("Deployment is missing its Kubernetes UID", "cluster"))?;
+    let deployment_uid = deployment.metadata.uid.as_deref().ok_or_else(|| {
+        AppError::new(
+            "Deployment is missing its Kubernetes UID",
+            AppErrorKind::Cluster,
+        )
+    })?;
     let replica_sets: Api<ReplicaSet> = Api::namespaced(client, namespace);
     let replica_sets = replica_sets
         .list(&ListParams::default())

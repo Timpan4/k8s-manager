@@ -4,6 +4,16 @@ use crate::models::{
 };
 use serde_json::json;
 
+pub(crate) fn pod_restarts(
+    statuses: Option<&[k8s_openapi::api::core::v1::ContainerStatus]>,
+) -> Option<i32> {
+    let total = statuses?.iter().try_fold(0_i32, |total, status| {
+        (status.restart_count >= 0).then_some(())?;
+        total.checked_add(status.restart_count)
+    })?;
+    (total > 0).then_some(total)
+}
+
 pub(crate) fn update_resource_health(summary: &mut ResourceSummary) {
     let state = classify_resource_health(summary);
     summary.health_assessment = evaluate_health(HealthAssessmentInput {
@@ -112,6 +122,25 @@ fn ready_ratio(ready: &str) -> Option<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pod_restarts_preserves_counts_without_overflow_or_negative_values() {
+        use k8s_openapi::api::core::v1::ContainerStatus;
+        let statuses = |counts: &[i32]| {
+            counts
+                .iter()
+                .map(|count| ContainerStatus {
+                    restart_count: *count,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pod_restarts(Some(&statuses(&[2, 3]))), Some(5));
+        assert_eq!(pod_restarts(Some(&statuses(&[0]))), None);
+        assert_eq!(pod_restarts(None), None);
+        assert_eq!(pod_restarts(Some(&statuses(&[i32::MAX, 1]))), None);
+        assert_eq!(pod_restarts(Some(&statuses(&[-1, 2]))), None);
+    }
 
     fn summary(status: &str, ready: &str, restarts: Option<i32>) -> ResourceSummary {
         ResourceSummary {

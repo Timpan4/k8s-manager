@@ -3,6 +3,7 @@ use crate::commands::gitops_crd::{
     resource_yaml,
 };
 use crate::commands::helpers::{k8s_creation_timestamp_to_rfc3339, resource_age};
+use crate::models::AppErrorKind;
 use crate::models::{
     evaluate_health, AppError, ArgoAppProjectDetails, ArgoAppProjectSummary, HealthAssessmentInput,
     YamlEncoding, YamlViewMode,
@@ -62,14 +63,19 @@ pub async fn get_argocd_appproject_details(
 
     let ar = match find_api_resource(&client, "argoproj.io", "AppProject").await? {
         Some(ar) => ar,
-        None => return Err(AppError::new("AppProject CRD not found", "cluster")),
+        None => {
+            return Err(AppError::new(
+                "AppProject CRD not found",
+                AppErrorKind::Cluster,
+            ))
+        }
     };
 
     let obj = get_crd_object(client.clone(), &ar, &name, namespace.as_deref()).await?;
     let yaml = resource_yaml(&obj, yaml_view_mode, yaml_encoding)?;
     let metadata = resource_metadata(&obj)?;
     let summary = app_project_summary_from_object(&cluster_context, &obj)
-        .ok_or_else(|| AppError::new("invalid AppProject data", "cluster"))?;
+        .ok_or_else(|| AppError::new("invalid AppProject data", AppErrorKind::Cluster))?;
     Ok(ArgoAppProjectDetails {
         summary,
         yaml,

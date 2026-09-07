@@ -45,6 +45,7 @@
 	import PodExecLaunchForm from "./PodExecLaunchForm.svelte";
 	import PodExecSessionList from "./PodExecSessionList.svelte";
 	import { createExecTerminal, type ExecTerminalHandle } from "./execTerminal";
+	import { createExecInput } from "./execInput";
 	import type { ContainerStatusRow } from "./helpers";
 
 	const DEFAULT_COLS = 100;
@@ -79,6 +80,7 @@
 	let channel = $state<ReturnType<typeof createPodExecChannel> | null>(null);
 	let terminalHost = $state<HTMLDivElement | null>(null);
 	let terminal: ExecTerminalHandle | null = null;
+	let input: ReturnType<typeof createExecInput> | null = null;
 
 	const isPod = $derived(resource.kind === "Pod" && Boolean(resource.namespace));
 	const showKubeconfigSourceLabels = $derived(
@@ -106,10 +108,10 @@
 			const nextTerminal = createExecTerminal(
 				terminalHost,
 				(data) => {
-					if (sessionId) void writePodExecStdin(client, sessionId, data);
+					input?.enqueue(data);
 				},
 				(size) => {
-					if (sessionId) void resizePodExecTerminal(client, sessionId, size);
+					if (sessionId) void resizePodExecTerminal(client, sessionId, size).catch((err) => { error = err; });
 				},
 			);
 			terminal = nextTerminal;
@@ -117,6 +119,7 @@
 			const frame = window.requestAnimationFrame(fit);
 			window.addEventListener("resize", fit);
 			return () => {
+				input?.dispose();
 				window.cancelAnimationFrame(frame);
 				window.removeEventListener("resize", fit);
 				if (channel) closePodExecChannel(channel);
@@ -132,6 +135,7 @@
 			};
 		}
 		return () => {
+			input?.dispose();
 			if (channel) closePodExecChannel(channel);
 			if (sessionId) {
 				void stopPodExec({
@@ -162,6 +166,8 @@
 	}
 
 	function closeChannelOnly() {
+		input?.dispose();
+		input = null;
 		if (channel) closePodExecChannel(channel);
 		channel = null;
 		sessionId = null;
@@ -171,6 +177,11 @@
 		if (event.type !== "started" && sessionId && event.sessionId !== sessionId) return;
 		if (event.type === "started") {
 			sessionId = event.sessionId;
+			input?.dispose();
+			input = createExecInput(
+				(data) => writePodExecStdin(client, event.sessionId, data),
+				(err) => { error = err; },
+			);
 			status = event.summary.status;
 			return;
 		}

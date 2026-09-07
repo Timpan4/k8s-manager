@@ -88,3 +88,27 @@ metadata:
     assert_eq!(summary.resources[1].kind.as_deref(), Some("IngressClass"));
     assert_eq!(summary.resources[1].namespace, None);
 }
+
+#[test]
+fn rejects_decoded_release_over_approved_budget() {
+    use std::io::Write;
+    const LIMIT: usize = 32 * 1024 * 1024;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(b"{\"manifest\":\"").unwrap();
+    let block = [b'x'; 1024];
+    for _ in 0..LIMIT / block.len() {
+        encoder.write_all(&block).unwrap();
+    }
+    encoder.write_all(b"\"}").unwrap();
+    let payload = STANDARD.encode(encoder.finish().unwrap());
+    let error = decode_helm_release(payload.as_bytes()).unwrap_err();
+    assert_eq!(error.kind, AppErrorKind::Validation);
+    assert!(error.message.contains("32 MiB"));
+}
+
+#[test]
+fn supports_uncompressed_legacy_helm_release() {
+    let encoded = STANDARD.encode(br#"{"name":"legacy","namespace":"default"}"#);
+    let decoded = decode_helm_release(encoded.as_bytes()).expect("legacy release");
+    assert_eq!(decoded.name.as_deref(), Some("legacy"));
+}

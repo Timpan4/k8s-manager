@@ -5,6 +5,7 @@ use crate::commands::{
     kubeconfig::KubeconfigSource,
     BackendCancellationRegistry,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ResourceEventSummary};
 use chrono::{DateTime, Utc};
 use kube::api::Api;
@@ -153,7 +154,7 @@ pub async fn list_resource_events(
                 started.elapsed().as_millis()
             );
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!(
                 "[kubecove:backend] list_resource_events cancelled context={} kind={} namespace={} name={} ms={}",
                 cluster_context,

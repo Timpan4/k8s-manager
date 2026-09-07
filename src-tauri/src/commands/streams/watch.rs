@@ -58,6 +58,12 @@ fn reset_resource_version_for_error<K>(
     Some(watch_status_message(status))
 }
 
+fn reset_resource_version_for_api_error(resource_version: &mut String, error: &kube::Error) {
+    if matches!(error, kube::Error::Api(status) if status.code == 410) {
+        *resource_version = "0".to_string();
+    }
+}
+
 fn dynamic_event_target(
     cluster_context: &str,
     kind: &str,
@@ -194,6 +200,7 @@ pub(super) async fn run_resource_watch(
                             }
                         }
                         Err(err) => {
+                            reset_resource_version_for_api_error(&mut resource_version, &err);
                             if !broadcaster.error(err.to_string()) {
                                 return;
                             }
@@ -203,6 +210,7 @@ pub(super) async fn run_resource_watch(
                 }
             }
             Err(err) => {
+                reset_resource_version_for_api_error(&mut resource_version, &err);
                 if !broadcaster.error(err.to_string()) {
                     return;
                 }
@@ -296,6 +304,7 @@ pub(super) async fn run_event_watch(
                             }
                         }
                         Err(err) => {
+                            reset_resource_version_for_api_error(&mut resource_version, &err);
                             if !broadcaster.error(err.to_string()) {
                                 return;
                             }
@@ -305,6 +314,7 @@ pub(super) async fn run_event_watch(
                 }
             }
             Err(err) => {
+                reset_resource_version_for_api_error(&mut resource_version, &err);
                 if !broadcaster.error(err.to_string()) {
                     return;
                 }
@@ -372,6 +382,20 @@ mod tests {
 
         assert!(reset_resource_version_for_error(&mut resource_version, &event).is_some());
         assert_eq!(resource_version, "55");
+    }
+
+    #[test]
+    fn http_gone_resets_version_without_matching_error_text() {
+        for (code, expected) in [(410, "0"), (403, "55")] {
+            let mut version = "55".to_string();
+            let error = kube::Error::Api(Box::new(Status {
+                code,
+                message: "410 Gone text must not control recovery".into(),
+                ..Status::default()
+            }));
+            reset_resource_version_for_api_error(&mut version, &error);
+            assert_eq!(version, expected);
+        }
     }
 
     #[tokio::test]

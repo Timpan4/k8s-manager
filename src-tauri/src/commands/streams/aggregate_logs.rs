@@ -1,6 +1,7 @@
-use super::{client_for_context, send};
+use super::{client_for_context, logs::read_log_line, send};
+use crate::models::AppErrorKind;
 use crate::models::{AggregatedLogStreamRequest, AppError, LogLineSource, StreamMessage};
-use futures_util::{AsyncBufReadExt, StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use k8s_openapi::{
     api::{
         apps::v1::Deployment,
@@ -14,7 +15,6 @@ use kube::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex},
     time::Duration,
 };
 use tauri::{async_runtime::JoinHandle, ipc::Channel};
@@ -36,11 +36,7 @@ struct LogSourceKey {
 #[derive(Default)]
 struct SourceStreams {
     handles: HashMap<LogSourceKey, JoinHandle<()>>,
-    /// Sources whose task has exited (stream ended, errored, or channel
-    /// closed). Reconcile drains this so dead sources respawn on the next
-    /// pod list instead of staying dead forever.
-    finished: Arc<Mutex<BTreeSet<LogSourceKey>>>,
-    /// Sources ever spawned. Respawns after a break follow live output only,
+    /// Sources spawned in the current target set. Respawns follow live output only,
     /// so a completed container does not re-replay its tail every relist.
     attached: BTreeSet<LogSourceKey>,
 }
@@ -51,26 +47,6 @@ impl Drop for SourceStreams {
             handle.abort();
         }
     }
-}
-
-fn spawn_log_source(
-    source_streams: &SourceStreams,
-    client: Client,
-    namespace: String,
-    source: LogSourceKey,
-    options: LogStreamOptions,
-    channel: Channel<StreamMessage>,
-    stream_id: String,
-) -> JoinHandle<()> {
-    let finished = Arc::clone(&source_streams.finished);
-    let finished_source = source.clone();
-    tauri::async_runtime::spawn(async move {
-        stream_log_source(client, namespace, source, options, channel, stream_id).await;
-        finished
-            .lock()
-            .expect("aggregated log source finish lock")
-            .insert(finished_source);
-    })
 }
 
 pub(super) async fn run_aggregated_log_stream(
@@ -211,9 +187,9 @@ async fn resolve_target_selector(
                 .get(&request.target_name)
                 .await
                 .map_err(AppError::from)?;
-            let spec = deployment
-                .spec
-                .ok_or_else(|| AppError::new("Deployment spec is unavailable", "logs"))?;
+            let spec = deployment.spec.ok_or_else(|| {
+                AppError::new("Deployment spec is unavailable", AppErrorKind::Logs)
+            })?;
             selector_from_label_selector(&spec.selector)
         }
         "Service" => {
@@ -226,7 +202,7 @@ async fn resolve_target_selector(
         }
         _ => Err(AppError::new(
             "aggregated logs support Deployment and selector-backed Service targets",
-            "validation",
+            AppErrorKind::Validation,
         )),
     }
 }
@@ -244,7 +220,7 @@ fn selector_from_label_selector(selector: &LabelSelector) -> Result<String, AppE
                     if values.is_empty() {
                         return Err(AppError::new(
                             "Deployment selector In expression needs values",
-                            "validation",
+                            AppErrorKind::Validation,
                         ));
                     }
                     parts.push(format!("{} in ({})", expression.key, values.join(",")));
@@ -253,7 +229,7 @@ fn selector_from_label_selector(selector: &LabelSelector) -> Result<String, AppE
                     if values.is_empty() {
                         return Err(AppError::new(
                             "Deployment selector NotIn expression needs values",
-                            "validation",
+                            AppErrorKind::Validation,
                         ));
                     }
                     parts.push(format!("{} notin ({})", expression.key, values.join(",")));
@@ -263,14 +239,17 @@ fn selector_from_label_selector(selector: &LabelSelector) -> Result<String, AppE
                 operator => {
                     return Err(AppError::new(
                         format!("unsupported Deployment selector operator: {operator}"),
-                        "validation",
+                        AppErrorKind::Validation,
                     ));
                 }
             }
         }
     }
     if parts.is_empty() {
-        return Err(AppError::new("Deployment selector is empty", "validation"));
+        return Err(AppError::new(
+            "Deployment selector is empty",
+            AppErrorKind::Validation,
+        ));
     }
     Ok(parts.join(","))
 }
@@ -279,11 +258,11 @@ fn service_label_selector(service: &Service) -> Result<String, AppError> {
     let spec = service
         .spec
         .as_ref()
-        .ok_or_else(|| AppError::new("service spec is unavailable", "logs"))?;
+        .ok_or_else(|| AppError::new("service spec is unavailable", AppErrorKind::Logs))?;
     if matches!(spec.type_.as_deref(), Some("ExternalName")) {
         return Err(AppError::new(
             "ExternalName Services do not have pod logs",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let selector = spec
@@ -293,7 +272,7 @@ fn service_label_selector(service: &Service) -> Result<String, AppError> {
         .ok_or_else(|| {
             AppError::new(
                 "aggregated Service logs require a selector-backed Service",
-                "validation",
+                AppErrorKind::Validation,
             )
         })?;
     Ok(map_label_selector(selector))
@@ -353,6 +332,9 @@ fn reconcile_sources(
     stream_id: String,
 ) {
     let desired = sources.into_iter().collect::<BTreeSet<_>>();
+    source_streams
+        .attached
+        .retain(|source| desired.contains(source));
     let stale = source_streams
         .handles
         .keys()
@@ -363,18 +345,10 @@ fn reconcile_sources(
         if let Some(handle) = source_streams.handles.remove(&source) {
             handle.abort();
         }
-        source_streams.attached.remove(&source);
     }
-    let finished = {
-        let mut finished = source_streams
-            .finished
-            .lock()
-            .expect("aggregated log source finish lock");
-        std::mem::take(&mut *finished)
-    };
-    for source in finished {
-        source_streams.handles.remove(&source);
-    }
+    source_streams
+        .handles
+        .retain(|_, handle| !handle.inner().is_finished());
     for source in desired {
         if source_streams.handles.contains_key(&source) {
             continue;
@@ -388,15 +362,14 @@ fn reconcile_sources(
         } else {
             source_streams.attached.insert(source.clone());
         }
-        let handle = spawn_log_source(
-            source_streams,
+        let handle = tauri::async_runtime::spawn(stream_log_source(
             client.clone(),
             namespace.clone(),
             source.clone(),
             spawn_options,
             channel.clone(),
             stream_id.clone(),
-        );
+        ));
         source_streams.handles.insert(source, handle);
     }
 }
@@ -420,9 +393,9 @@ async fn stream_log_source(
     };
     match pods.log_stream(&source.pod_name, &params).await {
         Ok(logs) => {
-            let mut lines = logs.lines();
+            let mut logs = logs;
             loop {
-                match lines.try_next().await {
+                match read_log_line(&mut logs).await {
                     Ok(Some(line)) => {
                         if !send(
                             &channel,
@@ -504,6 +477,33 @@ fn aggregate_status_message(total_sources: usize, active_sources: usize) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn audit_departed_log_sources_release_replay_bookkeeping() {
+        let source = LogSourceKey {
+            pod_name: "old-pod".into(),
+            container: "app".into(),
+        };
+        let mut streams = SourceStreams::default();
+        streams.attached.insert(source);
+        let (service, _handle) = tower_test::mock::pair::<
+            http::Request<kube::client::Body>,
+            http::Response<kube::client::Body>,
+        >();
+        reconcile_sources(
+            &mut streams,
+            Vec::new(),
+            Client::new(service, "default"),
+            "default".into(),
+            LogStreamOptions {
+                tail_lines: Some(10),
+                since_seconds: None,
+            },
+            Channel::new(|_| Ok(())),
+            "logs".into(),
+        );
+        assert!(streams.attached.is_empty());
+    }
     use k8s_openapi::{
         api::core::v1::{Container, PodSpec, ServiceSpec},
         apimachinery::pkg::apis::meta::v1::{LabelSelectorRequirement, Time},
@@ -610,7 +610,7 @@ mod tests {
             service_label_selector(&empty)
                 .expect_err("selectorless")
                 .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
     }
 

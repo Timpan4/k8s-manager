@@ -2,6 +2,7 @@ use super::connected::{api_delete, api_get, api_post, ConnectedArgo};
 use super::scope::{acquire_connection_lease, scoped_connection, ConnectionLease};
 use super::session::{consume, issue, peek, OperationSession, SessionSnapshot};
 use crate::commands::gitops_crd::{client_for_context, find_api_resource};
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, ArgoApplicationRef, ArgoOperationConfirmation, ArgoOperationPreflight,
     ArgoOperationRequest, ArgoOperationResult,
@@ -29,16 +30,23 @@ fn ensure_kubernetes_transport_action(action: &str) -> Result<(), AppError> {
     } else {
         Err(AppError::new(
             "operation unavailable in Kubernetes fallback",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ))
     }
 }
 
 fn valid(request: &ArgoOperationRequest) -> Result<(), AppError> {
+    if request.transport == "kubernetes" {
+        crate::commands::helpers::validate_namespace(request.application.namespace.as_deref())?;
+        crate::commands::helpers::validate_path_segment(
+            &request.application.name,
+            "Application name",
+        )?;
+    }
     if !matches!(request.transport.as_str(), "connected" | "kubernetes") {
         return Err(AppError::new(
             "invalid Argo CD transport",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     if !matches!(
@@ -47,19 +55,19 @@ fn valid(request: &ArgoOperationRequest) -> Result<(), AppError> {
     ) {
         return Err(AppError::new(
             "operation is not allowlisted",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     if request.application.name.trim().is_empty() {
         return Err(AppError::new(
             "application name required",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     if request.action == "rollback" && request.history_id.is_none() {
         return Err(AppError::new(
             "history ID required for rollback",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     if request.action == "resourceAction" {
@@ -78,7 +86,7 @@ fn valid(request: &ArgoOperationRequest) -> Result<(), AppError> {
         {
             return Err(AppError::new(
                 "one server-reported resource action and complete resource identity required",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ));
         }
     }
@@ -100,12 +108,14 @@ pub async fn preflight_argo_operation(
     if resolved_request.transport == "connected" && resolved_request.action == "resourceAction" {
         let connection = scoped_connection(
             &store,
-            resolved_request
-                .connection_id
-                .as_deref()
-                .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?,
+            resolved_request.connection_id.as_deref().ok_or_else(|| {
+                AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+            })?,
             resolved_request.cluster_context.as_deref().ok_or_else(|| {
-                AppError::new("clusterContext required", "argoOperationUnavailable")
+                AppError::new(
+                    "clusterContext required",
+                    AppErrorKind::ArgoOperationUnavailable,
+                )
             })?,
             resolved_request.application.workspace_id.as_deref(),
             resolved_request.kubeconfig_env_var.as_deref(),
@@ -137,7 +147,7 @@ async fn fallback_allowed(request: &ArgoOperationRequest) -> Result<(), AppError
         .ok_or_else(|| {
             AppError::new(
                 "clusterContext required for Kubernetes fallback",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             )
         })?;
     let namespace = request
@@ -148,7 +158,7 @@ async fn fallback_allowed(request: &ArgoOperationRequest) -> Result<(), AppError
         .ok_or_else(|| {
             AppError::new(
                 "application namespace required for Kubernetes fallback",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             )
         })?;
     if request
@@ -158,7 +168,7 @@ async fn fallback_allowed(request: &ArgoOperationRequest) -> Result<(), AppError
     {
         return Err(AppError::new(
             "resourceVersion required for Kubernetes fallback",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let client = client_for_context(context, request.kubeconfig_env_var.clone()).await?;
@@ -187,7 +197,7 @@ async fn fallback_allowed(request: &ArgoOperationRequest) -> Result<(), AppError
     if !status.is_some_and(|value| value.allowed && !value.denied.unwrap_or(false)) {
         return Err(AppError::new(
             "operation unavailable or not authorized",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     Ok(())
@@ -206,25 +216,25 @@ async fn lease_connection(
     session: &OperationSession,
     connection: Arc<ConnectedArgo>,
 ) -> Result<ConnectionLease, AppError> {
-    let connection_id = session
-        .connection_id
-        .as_deref()
-        .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?;
-    let cluster_context = session
-        .request
-        .cluster_context
-        .as_deref()
-        .ok_or_else(|| AppError::new("clusterContext required", "argoOperationUnavailable"))?;
+    let connection_id = session.connection_id.as_deref().ok_or_else(|| {
+        AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+    })?;
+    let cluster_context = session.request.cluster_context.as_deref().ok_or_else(|| {
+        AppError::new(
+            "clusterContext required",
+            AppErrorKind::ArgoOperationUnavailable,
+        )
+    })?;
     let generation = session.connection_generation.as_deref().ok_or_else(|| {
         AppError::new(
             "Argo CD connection was replaced",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         )
     })?;
     let instance_id = session.connection_instance_id.as_deref().ok_or_else(|| {
         AppError::new(
             "Argo CD connection was replaced",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         )
     })?;
     acquire_connection_lease(
@@ -270,7 +280,7 @@ async fn run_connected_operation(
         _ => {
             return Err(AppError::new(
                 "operation is not allowlisted",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ))
         }
     };
@@ -291,7 +301,7 @@ async fn run_argo_operation_for_store(
     if confirmation.confirmation != confirmation.session_id {
         return Err(AppError::new(
             "operation confirmation does not match reviewed session",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let reviewed = peek(&store.sessions, &confirmation.session_id, None)?;
@@ -328,27 +338,28 @@ async fn revalidate_session(
     if request.transport == "connected" {
         let connection = scoped_connection(
             store,
-            request
-                .connection_id
-                .as_deref()
-                .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?,
+            request.connection_id.as_deref().ok_or_else(|| {
+                AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+            })?,
             request.cluster_context.as_deref().ok_or_else(|| {
-                AppError::new("clusterContext required", "argoOperationUnavailable")
+                AppError::new(
+                    "clusterContext required",
+                    AppErrorKind::ArgoOperationUnavailable,
+                )
             })?,
             session.workspace_id.as_deref(),
             request.kubeconfig_env_var.as_deref(),
         )?;
-        let connection_id = request
-            .connection_id
-            .as_deref()
-            .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?;
+        let connection_id = request.connection_id.as_deref().ok_or_else(|| {
+            AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+        })?;
         if session.connection_id.as_deref() != Some(connection_id)
             || session.connection_generation.as_deref() != Some(connection.generation.as_str())
             || session.connection_instance_id.as_deref() != Some(connection.instance_id.as_str())
         {
             return Err(AppError::new(
                 "Argo CD connection was replaced",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ));
         }
         let current = api_get(
@@ -367,7 +378,7 @@ async fn revalidate_session(
     let client = client_for_context(context, request.kubeconfig_env_var.clone()).await?;
     let resource = find_api_resource(&client, "argoproj.io", "Application")
         .await?
-        .ok_or_else(|| AppError::new("Application CRD not found", "cluster"))?;
+        .ok_or_else(|| AppError::new("Application CRD not found", AppErrorKind::Cluster))?;
     let current = Api::<DynamicObject>::namespaced_with(
         client.clone(),
         request.application.namespace.as_deref().expect("validated"),
@@ -375,8 +386,22 @@ async fn revalidate_session(
     )
     .get(&request.application.name)
     .await?;
-    verify_application_identity(&current.data, &session.application)?;
+    verify_kubernetes_application_identity(&current, &session.application)?;
     Ok(ExecutionBinding::Kubernetes { client, resource })
+}
+
+fn verify_kubernetes_application_identity(
+    current: &DynamicObject,
+    expected: &ArgoApplicationRef,
+) -> Result<(), AppError> {
+    let value = serde_json::to_value(current).map_err(|error| {
+        AppError::new(
+            "could not serialize Application identity",
+            AppErrorKind::Serialization,
+        )
+        .with_source(error)
+    })?;
+    verify_application_identity(&value, expected)
 }
 
 fn verify_application_identity(
@@ -417,7 +442,7 @@ fn verify_application_identity(
     {
         return Err(AppError::new(
             "Application changed since operation review",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     Ok(())
@@ -545,7 +570,7 @@ async fn validate_resource_action(
     {
         return Err(AppError::new(
             "resource action is not reported by Argo CD",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let parameters = request
@@ -557,7 +582,7 @@ async fn validate_resource_action(
     {
         return Err(AppError::new(
             "resource action parameters must be string values",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     if action_definition
@@ -581,7 +606,7 @@ async fn validate_resource_action(
     {
         return Err(AppError::new(
             "required resource action parameters missing",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     Ok(())
@@ -614,7 +639,7 @@ async fn kubernetes_operation(
         _ => {
             return Err(AppError::new(
                 "operation unavailable in Kubernetes fallback",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ))
         }
     };
@@ -639,12 +664,14 @@ async fn resolve_request(
     let (mut resolved, generation, instance_id) = if request.transport == "connected" {
         let connection = scoped_connection(
             store,
-            request
-                .connection_id
-                .as_deref()
-                .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?,
+            request.connection_id.as_deref().ok_or_else(|| {
+                AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+            })?,
             request.cluster_context.as_deref().ok_or_else(|| {
-                AppError::new("clusterContext required", "argoOperationUnavailable")
+                AppError::new(
+                    "clusterContext required",
+                    AppErrorKind::ArgoOperationUnavailable,
+                )
             })?,
             request.application.workspace_id.as_deref(),
             request.kubeconfig_env_var.as_deref(),
@@ -697,53 +724,61 @@ async fn resolve_request(
         }
         return Ok((resolved, generation, instance_id));
     }
-    let sync =
-        if resolved.transport == "connected" {
-            let connection = scoped_connection(
-                store,
-                resolved.connection_id.as_deref().ok_or_else(|| {
-                    AppError::new("Argo CD connection required", "argoConnection")
-                })?,
-                resolved.cluster_context.as_deref().ok_or_else(|| {
-                    AppError::new("clusterContext required", "argoOperationUnavailable")
-                })?,
-                resolved.application.workspace_id.as_deref(),
-                resolved.kubeconfig_env_var.as_deref(),
-            )?;
-            api_get(
-                &connection,
-                &application_path(&resolved.application, "", None),
-            )
-            .await?
-            .pointer("/status/operationState/operation/sync")
-            .cloned()
-        } else {
-            let context = request.cluster_context.as_deref().ok_or_else(|| {
-                AppError::new("clusterContext required", "argoOperationUnavailable")
-            })?;
-            let client = client_for_context(context, request.kubeconfig_env_var.clone()).await?;
-            let ar = find_api_resource(&client, "argoproj.io", "Application")
-                .await?
-                .ok_or_else(|| AppError::new("Application CRD not found", "cluster"))?;
-            Api::<DynamicObject>::namespaced_with(
-                client,
-                request.application.namespace.as_deref().ok_or_else(|| {
-                    AppError::new("application namespace required", "argoOperationUnavailable")
-                })?,
-                &ar,
-            )
-            .get(&request.application.name)
-            .await?
-            .data
-            .pointer("/status/operationState/operation/sync")
-            .cloned()
-        }
-        .ok_or_else(|| {
+    let sync = if resolved.transport == "connected" {
+        let connection = scoped_connection(
+            store,
+            resolved.connection_id.as_deref().ok_or_else(|| {
+                AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+            })?,
+            resolved.cluster_context.as_deref().ok_or_else(|| {
+                AppError::new(
+                    "clusterContext required",
+                    AppErrorKind::ArgoOperationUnavailable,
+                )
+            })?,
+            resolved.application.workspace_id.as_deref(),
+            resolved.kubeconfig_env_var.as_deref(),
+        )?;
+        api_get(
+            &connection,
+            &application_path(&resolved.application, "", None),
+        )
+        .await?
+        .pointer("/status/operationState/operation/sync")
+        .cloned()
+    } else {
+        let context = request.cluster_context.as_deref().ok_or_else(|| {
             AppError::new(
-                "no recorded sync operation to retry",
-                "argoOperationUnavailable",
+                "clusterContext required",
+                AppErrorKind::ArgoOperationUnavailable,
             )
         })?;
+        let client = client_for_context(context, request.kubeconfig_env_var.clone()).await?;
+        let ar = find_api_resource(&client, "argoproj.io", "Application")
+            .await?
+            .ok_or_else(|| AppError::new("Application CRD not found", AppErrorKind::Cluster))?;
+        Api::<DynamicObject>::namespaced_with(
+            client,
+            request.application.namespace.as_deref().ok_or_else(|| {
+                AppError::new(
+                    "application namespace required",
+                    AppErrorKind::ArgoOperationUnavailable,
+                )
+            })?,
+            &ar,
+        )
+        .get(&request.application.name)
+        .await?
+        .data
+        .pointer("/status/operationState/operation/sync")
+        .cloned()
+    }
+    .ok_or_else(|| {
+        AppError::new(
+            "no recorded sync operation to retry",
+            AppErrorKind::ArgoOperationUnavailable,
+        )
+    })?;
     Ok((recorded_retry(&resolved, sync)?, generation, instance_id))
 }
 
@@ -796,7 +831,7 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
     let mut payload = sync.as_object().cloned().ok_or_else(|| {
         AppError::new(
             "recorded sync operation is invalid",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         )
     })?;
     if payload.keys().any(|key| {
@@ -813,7 +848,7 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
     }) {
         return Err(AppError::new(
             "recorded sync operation has unsupported fields",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let resources = match payload.remove("resources") {
@@ -822,7 +857,7 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
         Some(_) => {
             return Err(AppError::new(
                 "recorded sync resources are invalid",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ))
         }
     }
@@ -831,7 +866,7 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
         let resource = resource.as_object().ok_or_else(|| {
             AppError::new(
                 "recorded sync resource is invalid",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             )
         })?;
         if resource.keys().any(|key| {
@@ -842,13 +877,13 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
         }) {
             return Err(AppError::new(
                 "recorded sync resource has unsupported fields",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ));
         }
         if resource.values().any(|value| !value.is_string()) {
             return Err(AppError::new(
                 "recorded sync resource fields are invalid",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ));
         }
         let mut selector = serde_json::Map::new();
@@ -870,21 +905,21 @@ fn recorded_sync_payload(sync: Value) -> Result<Value, AppError> {
                 .ok_or_else(|| {
                     AppError::new(
                         "recorded sync options are invalid",
-                        "argoOperationUnavailable",
+                        AppErrorKind::ArgoOperationUnavailable,
                     )
                 })?
         }
         Some(_) => {
             return Err(AppError::new(
                 "recorded sync options are invalid",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ))
         }
     };
     if options.iter().any(|option| !option.is_string()) {
         return Err(AppError::new(
             "recorded sync option is invalid",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let strategy = payload
@@ -911,14 +946,14 @@ mod tests {
     #[derive(Default)]
     struct MemorySessionStore(Mutex<HashMap<String, String>>);
     impl SecureStore for MemorySessionStore {
-        fn read(&self, id: &str) -> Result<Option<String>, ()> {
+        fn read(&self, id: &str) -> Result<Option<String>, AppError> {
             Ok(self.0.lock().unwrap().get(id).cloned())
         }
-        fn write(&self, id: &str, value: &str) -> Result<(), ()> {
+        fn write(&self, id: &str, value: &str) -> Result<(), AppError> {
             self.0.lock().unwrap().insert(id.into(), value.into());
             Ok(())
         }
-        fn delete(&self, id: &str) -> Result<(), ()> {
+        fn delete(&self, id: &str) -> Result<(), AppError> {
             self.0.lock().unwrap().remove(id);
             Ok(())
         }
@@ -1121,7 +1156,7 @@ mod tests {
             },
         ] {
             let error = valid(&request(incomplete)).unwrap_err();
-            assert_eq!(error.kind, "argoOperationUnavailable");
+            assert_eq!(error.kind, AppErrorKind::ArgoOperationUnavailable);
         }
     }
 
@@ -1136,6 +1171,31 @@ mod tests {
         assert!(verify_application_identity(&current, &expected).is_ok());
         expected.uid = Some("reviewed-uid".into());
         assert!(verify_application_identity(&current, &expected).is_err());
+    }
+
+    #[test]
+    fn kubernetes_identity_includes_object_metadata() {
+        let resource = ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(
+            "argoproj.io",
+            "v1alpha1",
+            "Application",
+        ));
+        let mut current = DynamicObject::new("app", &resource)
+            .within("argocd")
+            .data(json!({"spec":{"project":"default"}}));
+        current.metadata.uid = Some("uid-1".into());
+        current.metadata.resource_version = Some("42".into());
+        let expected = ArgoApplicationRef {
+            name: "app".into(),
+            namespace: Some("argocd".into()),
+            uid: Some("uid-1".into()),
+            resource_version: Some("42".into()),
+            project: Some("default".into()),
+            ..Default::default()
+        };
+        assert!(verify_kubernetes_application_identity(&current, &expected).is_ok());
+        current.metadata.resource_version = Some("43".into());
+        assert!(verify_kubernetes_application_identity(&current, &expected).is_err());
     }
 
     #[test]
@@ -1299,7 +1359,7 @@ mod kubernetes_transport_gate_tests {
         }
         for action in ["rollback", "terminate", "resourceAction", ""] {
             let error = ensure_kubernetes_transport_action(action).unwrap_err();
-            assert_eq!(error.kind, "argoOperationUnavailable");
+            assert_eq!(error.kind, AppErrorKind::ArgoOperationUnavailable);
         }
     }
 }

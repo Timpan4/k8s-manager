@@ -40,7 +40,7 @@ async fn node_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|node| {
             let mut summary = base_resource_summary(
@@ -76,7 +76,7 @@ async fn storageclass_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|sc| {
             base_resource_summary(
@@ -97,7 +97,7 @@ async fn persistentvolume_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|pv| {
             let mut summary = base_resource_summary(
@@ -121,7 +121,7 @@ async fn crd_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|crd| {
             let mut summary = base_resource_summary(

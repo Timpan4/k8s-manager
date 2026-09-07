@@ -85,7 +85,7 @@ async fn discovered_resources(client: Client) -> Result<Vec<DiscoveredResourceKi
     let discovery = Discovery::new(client)
         .run_aggregated()
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?;
+        .map_err(AppError::from)?;
     let mut kinds = Vec::new();
     for group in discovery.groups() {
         for (api_resource, capabilities) in group.recommended_resources() {
@@ -199,6 +199,10 @@ fn resource_identity_from_manifest(
     } else {
         None
     };
+    crate::commands::helpers::validate_namespace(namespace.as_deref())
+        .map_err(|error| error.message)?;
+    crate::commands::helpers::validate_path_segment(&name, "manifest resource name")
+        .map_err(|error| error.message)?;
     Ok(ResourceIdentity {
         key: ResourceKey {
             api_version,
@@ -297,6 +301,10 @@ async fn scan_label_only_resources(
     warnings: &mut Vec<String>,
 ) {
     let scan_kinds = conservative_label_scan_kinds(discovered, manifest_scan_kinds);
+    if let Err(error) = crate::commands::helpers::validate_namespace(Some(&release.namespace)) {
+        warnings.push(error.message);
+        return;
+    }
     let label_selector = format!("{HELM_RELEASE_LABEL}={}", release.name);
     for resource_kind in scan_kinds {
         let api_resource = match api_resource_from_discovered(&resource_kind) {

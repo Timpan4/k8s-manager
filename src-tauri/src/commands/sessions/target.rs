@@ -1,4 +1,5 @@
 use crate::commands::kubeconfig::KubeconfigSource;
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PortForwardRequest};
 use kube::Client;
 
@@ -52,7 +53,7 @@ pub(super) fn validate_port(value: i64, field: &str) -> Result<u16, AppError> {
     if !(1..=i64::from(u16::MAX)).contains(&value) {
         return Err(AppError::new(
             format!("{field} must be between 1 and 65535"),
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     Ok(value as u16)
@@ -72,7 +73,7 @@ fn validate_target_kind(request: &PortForwardRequest) -> Result<PortForwardTarge
         "Service" => Ok(PortForwardTargetKind::Service),
         _ => Err(AppError::new(
             "port-forward target kind must be Pod or Service",
-            "validation",
+            AppErrorKind::Validation,
         )),
     }
 }
@@ -83,14 +84,18 @@ pub(super) fn validate_request(
     if request.cluster_context.trim().is_empty() || request.namespace.trim().is_empty() {
         return Err(AppError::new(
             "port-forward target is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let target_kind = validate_target_kind(request)?;
     let target_name = target_text(request.target_name.as_ref())
         .or_else(|| target_text(request.pod_name.as_ref()))
-        .ok_or_else(|| AppError::new("port-forward target is required", "validation"))?;
+        .ok_or_else(|| {
+            AppError::new("port-forward target is required", AppErrorKind::Validation)
+        })?;
 
+    crate::commands::helpers::validate_namespace(Some(request.namespace.trim()))?;
+    crate::commands::helpers::validate_path_segment(&target_name, "port-forward target")?;
     let remote_port = validate_port(request.remote_port, "remote_port")?;
     let local_port = request
         .local_port
@@ -99,7 +104,7 @@ pub(super) fn validate_request(
     if matches!(local_port, Some(port) if port < MIN_USER_LOCAL_PORT) {
         return Err(AppError::new(
             "local_port must be 1024 or higher",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 

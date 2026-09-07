@@ -98,7 +98,7 @@ pub async fn list_namespaces(
                 err.message,
                 started.elapsed().as_millis()
             );
-            record_backend_error("list_namespaces", started, &err.kind);
+            record_backend_error("list_namespaces", started, err.kind.as_str());
         }
     }
     result

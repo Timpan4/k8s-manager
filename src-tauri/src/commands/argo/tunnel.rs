@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::{
     commands::sessions::{
         runner::{forward_pod_connection, should_retry_accept, ACCEPT_RETRY_DELAY},
@@ -64,12 +65,20 @@ impl ArgoServiceTunnel {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| {
-                AppError::new(format!("local tunnel unavailable: {error}"), "argoTunnel")
+                AppError::new(
+                    format!("local tunnel unavailable: {error}"),
+                    AppErrorKind::ArgoTunnel,
+                )
+                .with_source(error)
             })?;
         let local_port = listener
             .local_addr()
             .map_err(|error| {
-                AppError::new(format!("local tunnel unavailable: {error}"), "argoTunnel")
+                AppError::new(
+                    format!("local tunnel unavailable: {error}"),
+                    AppErrorKind::ArgoTunnel,
+                )
+                .with_source(error)
             })?
             .port();
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -142,16 +151,18 @@ async fn verify_port_forward(
 
 fn port_forward_error(error: kube::Error) -> AppError {
     let message = error.to_string();
-    if message.to_ascii_lowercase().contains("forbidden") {
+    if crate::models::kube_error_kind(&error) == AppErrorKind::Forbidden {
         return AppError::new(
             "Kubernetes RBAC denies pods/portforward for this Argo CD Service",
-            "argoTunnelForbidden",
-        );
+            AppErrorKind::ArgoTunnelForbidden,
+        )
+        .with_source(error);
     }
     AppError::new(
         format!("Argo CD Service tunnel could not open: {message}"),
-        "argoTunnel",
+        AppErrorKind::ArgoTunnel,
     )
+    .with_source(error)
 }
 
 async fn run_tunnel(
@@ -177,8 +188,7 @@ async fn run_tunnel(
                             &route.service_name,
                             route.service_port,
                         )
-                        .await
-                        .map_err(|error| error.message)?;
+                        .await?;
                         forward_pod_connection(
                             client,
                             target.namespace,
@@ -245,7 +255,7 @@ mod tests {
             message: "pods/portforward is forbidden".into(),
             ..Default::default()
         })));
-        assert_eq!(error.kind, "argoTunnelForbidden");
+        assert_eq!(error.kind, AppErrorKind::ArgoTunnelForbidden);
         assert!(!error.message.contains("token"));
     }
 }

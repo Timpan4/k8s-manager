@@ -4,6 +4,7 @@ use crate::commands::helpers::{
     enrich_resource_summaries_with_flux_inventory, fetch_flux_ownership_index,
     filter_flux_ownership_index,
 };
+use crate::models::AppErrorKind;
 use crate::{
     commands::{
         diagnostic_field,
@@ -55,7 +56,7 @@ fn request_kind(request: &ResourceListRequest) -> Result<ResourceScopeKind, AppE
         (None, Some(resource_kind)) => Ok(ResourceScopeKind::Dynamic(resource_kind.clone())),
         _ => Err(AppError::new(
             "resource scope request must include exactly one kind",
-            "validation",
+            AppErrorKind::Validation,
         )),
     }
 }
@@ -267,7 +268,7 @@ pub async fn list_resource_scope(
                 started.elapsed().as_millis()
             );
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!(
                 "[kubecove:backend] list_resource_scope cancelled context={} ms={}",
                 cluster_context,
@@ -393,6 +394,6 @@ mod tests {
         })
         .expect_err("missing kind");
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
     }
 }

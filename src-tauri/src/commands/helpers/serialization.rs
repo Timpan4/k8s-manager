@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, YamlEncoding, YamlViewMode};
 use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
 use kube::{
@@ -8,6 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 pub(crate) fn redact_secret(secret: &mut k8s_openapi::api::core::v1::Secret) {
+    redact_secret_metadata(&mut secret.metadata);
     if let Some(ref mut data) = secret.data {
         for value in data.values_mut() {
             *value = k8s_openapi::ByteString(b"REDACTED".to_vec());
@@ -16,6 +18,16 @@ pub(crate) fn redact_secret(secret: &mut k8s_openapi::api::core::v1::Secret) {
     if let Some(ref mut string_data) = secret.string_data {
         for value in string_data.values_mut() {
             *value = "REDACTED".to_string();
+        }
+    }
+}
+
+pub(crate) fn redact_secret_metadata(metadata: &mut kube::api::ObjectMeta) {
+    if let Some(annotations) = &mut metadata.annotations {
+        // kubectl stores the complete previous document, including Secret data.
+        if let Some(value) = annotations.get_mut("kubectl.kubernetes.io/last-applied-configuration")
+        {
+            *value = "REDACTED".into();
         }
     }
 }
@@ -45,7 +57,7 @@ pub(crate) fn serialize_resource_document<T: Serialize>(
     encoding: YamlEncoding,
 ) -> Result<String, AppError> {
     let mut value = serde_json::to_value(resource)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     normalize_k8s_yaml_value(&mut value, mode);
     serialize_json_value_document(&value, encoding)
 }
@@ -55,9 +67,8 @@ pub(crate) fn serialize_json_value_document(
     encoding: YamlEncoding,
 ) -> Result<String, AppError> {
     match encoding {
-        YamlEncoding::Yaml => {
-            serde_yaml::to_string(value).map_err(|e| AppError::new(e.to_string(), "serialization"))
-        }
+        YamlEncoding::Yaml => serde_yaml::to_string(value)
+            .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e)),
         YamlEncoding::Kyaml => Ok(format!("{}\n", format_kyaml_value(value, 0))),
     }
 }
@@ -194,12 +205,14 @@ pub(crate) async fn fetch_and_serialize_with_encoding<
 where
     <T as Resource>::DynamicType: Default,
 {
+    super::validate_namespace(namespace)?;
+    super::validate_path_segment(name, "resource name")?;
     let api: Api<T> = if let Some(ns) = namespace {
         Api::namespaced(client, ns)
     } else {
         return Err(AppError::new(
             "namespace is required for namespaced resources",
-            "validation",
+            AppErrorKind::Validation,
         ));
     };
     let resource = api.get(name).await.map_err(AppError::from)?;
@@ -261,6 +274,7 @@ pub(crate) async fn fetch_and_serialize_cluster_with_encoding<
 where
     <T as Resource>::DynamicType: Default,
 {
+    super::validate_path_segment(name, "resource name")?;
     let api: Api<T> = Api::all(client);
     let resource = api.get(name).await.map_err(AppError::from)?;
     let yaml = serialize_resource_document(&resource, mode, encoding)?;
@@ -296,6 +310,22 @@ mod tests {
             secret.string_data.as_ref().unwrap().get("token").unwrap(),
             "REDACTED"
         );
+    }
+
+    #[test]
+    fn audit_secret_last_applied_annotation_is_redacted() {
+        let mut secret = Secret::default();
+        secret.metadata.annotations = Some(BTreeMap::from([
+            (
+                "kubectl.kubernetes.io/last-applied-configuration".into(),
+                "sensitive".into(),
+            ),
+            ("note".into(), "keep".into()),
+        ]));
+        redact_secret(&mut secret);
+        let serialized = serde_json::to_string(&secret).unwrap();
+        assert!(!serialized.contains("sensitive"));
+        assert!(serialized.contains("keep"));
     }
 
     #[test]

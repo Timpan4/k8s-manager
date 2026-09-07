@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::AppErrorKind;
 use std::{
     ffi::OsStr,
     fs,
@@ -277,7 +278,7 @@ fn missing_app_path_warns_and_falls_back_when_default_exists() {
 fn invalid_env_var_returns_validation_error() {
     let err = KubeconfigSource::new(Some("bad-name".to_string())).expect_err("invalid");
 
-    assert_eq!(err.kind, "validation");
+    assert_eq!(err.kind, AppErrorKind::Validation);
     assert!(err.message.contains("kubeconfig env var name"));
 }
 

@@ -1,4 +1,5 @@
 use crate::commands::{PodExecRegistry, PortForwardRegistry};
+use crate::models::AppErrorKind;
 use crate::models::{AppError, LiveSessionCleanupRequest, LiveSessionCleanupResult};
 use std::collections::HashSet;
 use tauri::State;
@@ -13,7 +14,7 @@ pub async fn stop_live_sessions_outside_scope(
     if kubeconfig_source_key.is_empty() {
         return Err(AppError::new(
             "kubeconfig source key is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 

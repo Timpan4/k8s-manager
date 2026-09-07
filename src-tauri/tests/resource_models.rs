@@ -1,3 +1,4 @@
+use kubecove_lib::models::AppErrorKind;
 use kubecove_lib::models::{
     AppError, AppUsageMetrics, AppUsageMetricsBreakdown, ArgoAppProjectDetails,
     ArgoAppProjectSummary, ArgoApplicationDetails, ArgoApplicationSetDetails,
@@ -15,16 +16,16 @@ use serde_json::json;
 
 #[test]
 fn test_app_error_new() {
-    let err = AppError::new("test message", "test_kind");
+    let err = AppError::new("test message", AppErrorKind::Validation);
     assert_eq!(err.message, "test message");
-    assert_eq!(err.kind, "test_kind");
+    assert_eq!(err.kind, AppErrorKind::Validation);
 }
 
 #[test]
 fn test_app_error_kube() {
-    let err = AppError::kube("kube error");
+    let err = AppError::new("kube error", AppErrorKind::Cluster);
     assert_eq!(err.message, "kube error");
-    assert_eq!(err.kind, "cluster");
+    assert_eq!(err.kind, AppErrorKind::Cluster);
 }
 
 #[test]
@@ -102,7 +103,7 @@ fn test_resource_details_serde() {
 
 #[test]
 fn test_app_error_serialize() {
-    let err = AppError::kube("connection refused");
+    let err = AppError::new("connection refused", AppErrorKind::Network);
     let json_val = serde_json::to_value(&err).unwrap();
     assert_eq!(json_val["message"], "connection refused");
     assert_eq!(json_val["kind"], "network");

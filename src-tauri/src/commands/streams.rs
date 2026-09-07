@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 mod aggregate_logs;
 mod kinds;
 mod logs;
@@ -29,10 +30,14 @@ fn validate_resource_watch_scope(
     cluster_context: &str,
     keys: &[WatchResourceKey],
 ) -> Result<(), AppError> {
+    for key in keys {
+        crate::commands::helpers::validate_namespace(key.namespace.as_deref())?;
+        kinds::api_resource_from_kind(&key.resource_kind)?;
+    }
     if cluster_context.trim().is_empty() || keys.is_empty() {
         return Err(AppError::new(
             "resource watch scope is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -47,7 +52,7 @@ fn validate_event_watch_target(
     if cluster_context.trim().is_empty() || kind.trim().is_empty() || name.trim().is_empty() {
         return Err(AppError::new(
             "event watch target is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -61,19 +66,21 @@ fn validate_pod_log_stream_request(request: &PodLogStreamRequest) -> Result<(), 
     {
         return Err(AppError::new(
             "pod log stream target is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
+    crate::commands::helpers::validate_namespace(Some(&request.namespace))?;
+    crate::commands::helpers::validate_path_segment(&request.pod_name, "Pod name")?;
     if matches!(request.tail_lines, Some(tail_lines) if tail_lines < 0) {
         return Err(AppError::new(
             "tail_lines must be non-negative",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if matches!(request.since_seconds, Some(since_seconds) if since_seconds < 0) {
         return Err(AppError::new(
             "since_seconds must be non-negative",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -90,25 +97,27 @@ fn validate_aggregated_log_stream_request(
     {
         return Err(AppError::new(
             "aggregated log stream target is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
+    crate::commands::helpers::validate_namespace(Some(&request.namespace))?;
+    crate::commands::helpers::validate_path_segment(&request.target_name, "log target")?;
     if !matches!(request.target_kind.as_str(), "Deployment" | "Service") {
         return Err(AppError::new(
             "aggregated logs support Deployment and selector-backed Service targets",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if matches!(request.tail_lines, Some(tail_lines) if tail_lines < 0) {
         return Err(AppError::new(
             "tail_lines must be non-negative",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if matches!(request.since_seconds, Some(since_seconds) if since_seconds < 0) {
         return Err(AppError::new(
             "since_seconds must be non-negative",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -144,7 +153,7 @@ pub async fn start_resource_watch(
                 broadcaster.clone(),
                 live_store.inner().clone(),
             ));
-            registry.set_resource_handle(&watch_key, handle);
+            registry.set_resource_handle(&watch_key, &broadcaster, handle);
         }
     }
     send(
@@ -167,6 +176,7 @@ pub async fn start_resource_event_watch(
     channel: Channel<StreamMessage>,
     registry: State<'_, StreamRegistry>,
 ) -> Result<String, AppError> {
+    crate::commands::helpers::validate_namespace(namespace.as_deref())?;
     validate_event_watch_target(&cluster_context, &kind, &name)?;
     let source_key = kubeconfig_source_key(kubeconfig_env_var.as_deref())?;
     let stream_id = registry.stream_id("events");
@@ -186,9 +196,9 @@ pub async fn start_resource_event_watch(
             name,
             namespace,
             kubeconfig_env_var,
-            broadcaster,
+            broadcaster.clone(),
         ));
-        registry.set_event_handle(&watch_key, handle);
+        registry.set_event_handle(&watch_key, &broadcaster, handle);
     }
     send(
         &channel,
@@ -306,7 +316,7 @@ mod tests {
             validate_resource_watch_scope("", &[])
                 .expect_err("empty scope")
                 .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
         assert_eq!(
             validate_resource_watch_scope("kind-dev", &[])
@@ -330,13 +340,13 @@ mod tests {
             validate_event_watch_target("kind-dev", "", "api-0")
                 .expect_err("empty kind")
                 .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
         assert_eq!(
             validate_event_watch_target("kind-dev", "Pod", " ")
                 .expect_err("empty name")
                 .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
     }
 
@@ -360,7 +370,7 @@ mod tests {
             })
             .expect_err("empty namespace")
             .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
         assert_eq!(
             validate_pod_log_stream_request(&PodLogStreamRequest {
@@ -369,7 +379,7 @@ mod tests {
             })
             .expect_err("empty pod")
             .kind,
-            "validation",
+            AppErrorKind::Validation,
         );
         assert_eq!(
             validate_pod_log_stream_request(&PodLogStreamRequest {

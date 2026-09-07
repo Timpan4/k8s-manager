@@ -1,4 +1,5 @@
 use crate::models::AppError;
+use crate::models::AppErrorKind;
 use kube::config::Kubeconfig;
 use std::{env, fs, path::PathBuf};
 
@@ -23,14 +24,15 @@ pub(crate) fn startup_config() -> Result<E2eConfig, AppError> {
     if !is_enabled() {
         return Err(AppError::new(
             "e2e feature requires KUBECOVE_E2E=1",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let kubeconfig = kubeconfig_path()?;
     let data_dir = required_absolute_path(DATA_DIR_ENV, true)?;
     let cluster = required_value(CLUSTER_ENV)?;
-    let config = Kubeconfig::read_from(&kubeconfig)
-        .map_err(|_| AppError::new("failed to load E2E kubeconfig", "validation"))?;
+    let config = Kubeconfig::read_from(&kubeconfig).map_err(|error| {
+        AppError::new("failed to load E2E kubeconfig", AppErrorKind::Validation).with_source(error)
+    })?;
     validate_kubeconfig(&config, &cluster)?;
     Ok(E2eConfig { data_dir })
 }
@@ -39,7 +41,12 @@ fn required_value(name: &str) -> Result<String, AppError> {
     env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::new(format!("{name} is required for E2E"), "validation"))
+        .ok_or_else(|| {
+            AppError::new(
+                format!("{name} is required for E2E"),
+                AppErrorKind::Validation,
+            )
+        })
 }
 
 fn required_absolute_path(name: &str, directory: bool) -> Result<PathBuf, AppError> {
@@ -55,11 +62,16 @@ fn canonical_existing_path(
     if !path.is_absolute() {
         return Err(AppError::new(
             format!("{name} must be an absolute path"),
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
-    let metadata = fs::metadata(&path)
-        .map_err(|_| AppError::new(format!("{name} path is unavailable"), "validation"))?;
+    let metadata = fs::metadata(&path).map_err(|error| {
+        AppError::new(
+            format!("{name} path is unavailable"),
+            AppErrorKind::Validation,
+        )
+        .with_source(error)
+    })?;
     if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
         let kind = if directory {
             "directory"
@@ -68,11 +80,16 @@ fn canonical_existing_path(
         };
         return Err(AppError::new(
             format!("{name} must be a {kind}"),
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
-    let canonical = fs::canonicalize(&path)
-        .map_err(|_| AppError::new(format!("{name} path is unavailable"), "validation"))?;
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        AppError::new(
+            format!("{name} path is unavailable"),
+            AppErrorKind::Validation,
+        )
+        .with_source(error)
+    })?;
     Ok(canonical)
 }
 
@@ -92,13 +109,13 @@ fn validate_kubeconfig(config: &Kubeconfig, cluster: &str) -> Result<(), AppErro
     if actual_contexts != expected_names {
         return Err(AppError::new(
             "E2E kubeconfig must contain exactly admin and restricted contexts for this run",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if config.clusters.len() != 1 || config.clusters[0].name != cluster {
         return Err(AppError::new(
             "E2E kubeconfig must contain only the exact run cluster",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let mut actual_users = config
@@ -110,7 +127,7 @@ fn validate_kubeconfig(config: &Kubeconfig, cluster: &str) -> Result<(), AppErro
     if actual_users != expected_names {
         return Err(AppError::new(
             "E2E kubeconfig must contain exactly admin and restricted users for this run",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     for role in ["admin", "restricted"] {
@@ -121,19 +138,22 @@ fn validate_kubeconfig(config: &Kubeconfig, cluster: &str) -> Result<(), AppErro
             .find(|context| context.name == context_name)
             .and_then(|context| context.context.as_ref())
             .ok_or_else(|| {
-                AppError::new(format!("missing E2E context {context_name}"), "validation")
+                AppError::new(
+                    format!("missing E2E context {context_name}"),
+                    AppErrorKind::Validation,
+                )
             })?;
         if context.cluster != cluster || context.user.as_deref() != Some(context_name.as_str()) {
             return Err(AppError::new(
                 format!("E2E context {context_name} must target its exact cluster and user"),
-                "validation",
+                AppErrorKind::Validation,
             ));
         }
     }
     if config.current_context.as_deref() != Some(expected_contexts[0].as_str()) {
         return Err(AppError::new(
             "E2E kubeconfig current context must be the run admin context",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let server = config
@@ -142,24 +162,33 @@ fn validate_kubeconfig(config: &Kubeconfig, cluster: &str) -> Result<(), AppErro
         .find(|named| named.name == cluster)
         .and_then(|named| named.cluster.as_ref())
         .and_then(|cluster| cluster.server.as_deref())
-        .ok_or_else(|| AppError::new("missing E2E cluster API server", "validation"))?;
-    let uri = server
-        .parse::<http::Uri>()
-        .map_err(|_| AppError::new("E2E cluster API server must be a URL", "validation"))?;
+        .ok_or_else(|| AppError::new("missing E2E cluster API server", AppErrorKind::Validation))?;
+    let uri = server.parse::<http::Uri>().map_err(|error| {
+        AppError::new(
+            "E2E cluster API server must be a URL",
+            AppErrorKind::Validation,
+        )
+        .with_source(error)
+    })?;
     if uri.scheme_str() != Some("https") {
         return Err(AppError::new(
             "E2E cluster API server must use HTTPS",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let host = uri
         .host()
         .map(|value| value.trim_start_matches('[').trim_end_matches(']'))
-        .ok_or_else(|| AppError::new("E2E cluster API server must have a host", "validation"))?;
+        .ok_or_else(|| {
+            AppError::new(
+                "E2E cluster API server must have a host",
+                AppErrorKind::Validation,
+            )
+        })?;
     if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
         return Err(AppError::new(
             "E2E cluster API server must use loopback",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     Ok(())
