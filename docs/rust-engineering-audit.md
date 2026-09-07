@@ -52,6 +52,8 @@ Helm compatibility was checked against [Helm's storage decoder](https://github.c
 
 The independent reviewer checked errors, Helm decoding, exec admission, port-forward ownership, URI validation, Secret redaction, and changed log reads. It found no actionable issue in that scope. Aggregate-log cleanup and kubeconform's final parser changes were reviewed locally and tested separately.
 
+Two additional Bun-style reviewers assessed PR #431, separating boundary/parser compatibility from lifecycle/cancellation behavior. The boundary reviewer identified a removed 422 admission-denial presentation category. Its regression failed before restoring that category, and the reviewer accepted the correction. This preserves the existing message-based admission display hint as a narrow compatibility exception; authorization, permission, transport, and cancellation handling remain typed. The lifecycle reviewer found no actionable defect. CI also caught the terminal helper's untyped error callback; it now parses a typed application error at the rejection boundary and preserves redacted messages and backend categories.
+
 Red-before-green proof was run for the demonstrated parser, permission, numeric, Secret, URI, argv, Argo identity, and aggregate-log regressions noted above. It was not run for every source-preservation edit. Tests that would hang indefinitely on the old implementation were not left running to manufacture a failing result.
 
 ## Remaining gaps and deliberately excluded work

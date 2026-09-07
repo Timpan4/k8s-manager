@@ -1,3 +1,6 @@
+import { messageFromError } from "@/lib/error-redaction";
+import type { AppError } from "@/lib/types";
+
 // Match the approved backend limits. Pending bytes include the in-flight write.
 export const EXEC_INPUT_CHUNK_BYTES = 16 * 1024;
 export const EXEC_PENDING_INPUT_BYTES = 256 * 1024;
@@ -7,9 +10,18 @@ function utf8Bytes(character: string): number {
 	return point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
 }
 
+function hasAppErrorKind<Value>(value: Value): value is Value & Pick<AppError, "kind"> {
+	return value instanceof Object && "kind" in value && String(value.kind) === value.kind;
+}
+
+function parseExecInputError(cause: unknown): AppError {
+	const kind = hasAppErrorKind(cause) ? cause.kind : "session";
+	return { kind, message: messageFromError(cause) };
+}
+
 export function createExecInput(
 	write: (data: string) => Promise<boolean>,
-	onError: (error: unknown) => void,
+	onError: (error: AppError) => void,
 ) {
 	let pending = 0;
 	let running = false;
@@ -46,7 +58,7 @@ export function createExecInput(
 				disposed = true;
 				queue.length = 0;
 				pending = 0;
-				onError(error);
+				onError(parseExecInputError(error));
 			}
 		} finally {
 			running = false;
@@ -60,7 +72,7 @@ export function createExecInput(
 			for (const character of data) {
 				bytes += utf8Bytes(character);
 				if (bytes > EXEC_PENDING_INPUT_BYTES - pending) {
-					onError(new Error("Terminal input exceeds the 256 KiB pending limit; this input was not sent"));
+					onError({ kind: "session", message: "Terminal input exceeds the 256 KiB pending limit; this input was not sent" });
 					return;
 				}
 			}

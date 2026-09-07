@@ -58,7 +58,14 @@ test("a failed write reports the error and stops pending input", async () => {
 	const input = createExecInput(async (data) => { writes.push(data); throw failure; }, reported.resolve);
 	input.enqueue("first");
 	input.enqueue("second");
-	expect(await reported.promise).toBe(failure);
+	expect(await reported.promise).toEqual({ kind: "session", message: "closed" });
 	input.enqueue("third");
 	expect(writes).toEqual(["first"]);
+});
+
+test("preserves backend error categories and redacts sensitive details", async () => {
+	const reported = Promise.withResolvers<unknown>();
+	const input = createExecInput(async () => { throw { kind: "forbidden", message: "denied Authorization: Bearer private-token" }; }, reported.resolve);
+	input.enqueue("first");
+	expect(await reported.promise).toEqual({ kind: "forbidden", message: "denied Authorization: Bearer [REDACTED]" });
 });

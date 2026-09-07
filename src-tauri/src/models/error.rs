@@ -195,6 +195,16 @@ fn status_kind(status: &kube::core::Status) -> AppErrorKind {
         return AppErrorKind::NotFound;
     }
     if status.code == 422 || status.reason == "Invalid" {
+        // Preserve legacy admission guidance carried only in Status.message.
+        // This presentation category must not authorize, retry, or cancel work.
+        let message = status.message.to_ascii_lowercase();
+        if message.contains("admission webhook")
+            || message.contains("denied the request")
+            || message.contains("violates")
+            || message.contains("podsecurity")
+        {
+            return AppErrorKind::AdmissionDenied;
+        }
         return AppErrorKind::InvalidResource;
     }
     AppErrorKind::Cluster
@@ -262,5 +272,23 @@ mod tests {
         let decoded: AppError = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.kind, AppErrorKind::Network);
         assert!(decoded.source().is_none());
+    }
+
+    #[test]
+    fn preserves_admission_guidance_for_invalid_status() {
+        let error = AppError::from(status(
+            422,
+            "Invalid",
+            "admission webhook \"policy\" denied the request",
+        ));
+        assert_eq!(error.kind, AppErrorKind::AdmissionDenied);
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["kind"],
+            "admissionDenied"
+        );
+        assert_eq!(
+            AppError::from(status(403, "Forbidden", "admission webhook")).kind,
+            AppErrorKind::Forbidden
+        );
     }
 }
