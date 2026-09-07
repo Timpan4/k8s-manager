@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::{
     commands::{
         diagnostic_field, diagnostics::record_backend_result, kubeconfig::KubeconfigSource,
@@ -61,7 +62,12 @@ async fn review_rbac_access_from(
 fn review_result(
     status: Option<SubjectAccessReviewStatus>,
 ) -> Result<RbacAccessReviewResult, AppError> {
-    let status = status.ok_or_else(|| AppError::kube("SubjectAccessReview returned no status"))?;
+    let status = status.ok_or_else(|| {
+        AppError::new(
+            "SubjectAccessReview returned no status",
+            AppErrorKind::Cluster,
+        )
+    })?;
     Ok(RbacAccessReviewResult {
         outcome: if status.allowed {
             RbacAccessReviewOutcome::Allowed
@@ -143,7 +149,10 @@ fn target_non_resource_attributes(
     };
     required("non-resource verb", verb)?;
     if !non_resource_url.trim().starts_with('/') {
-        return Err(AppError::kube("non-resource URL must start with /"));
+        return Err(AppError::new(
+            "non-resource URL must start with /",
+            AppErrorKind::Validation,
+        ));
     }
     Ok(Some(NonResourceAttributes {
         path: Some(non_resource_url.trim().to_string()),
@@ -153,7 +162,10 @@ fn target_non_resource_attributes(
 
 fn required(label: &str, value: &str) -> Result<(), AppError> {
     if value.trim().is_empty() {
-        Err(AppError::kube(format!("{label} is required")))
+        Err(AppError::new(
+            format!("{label} is required"),
+            AppErrorKind::Validation,
+        ))
     } else {
         Ok(())
     }

@@ -3,6 +3,7 @@ use crate::commands::gitops_crd::{
     resource_status, resource_yaml,
 };
 use crate::commands::helpers::{k8s_creation_timestamp_to_rfc3339, resource_age};
+use crate::models::AppErrorKind;
 use crate::models::{
     argo_health_assessment, AppError, ArgoApplicationDetails, ArgoApplicationSourceSummary,
     ArgoApplicationSummary, YamlEncoding, YamlViewMode,
@@ -113,7 +114,12 @@ pub async fn get_argocd_application_details(
 
     let ar = match find_api_resource(&client, "argoproj.io", "Application").await? {
         Some(ar) => ar,
-        None => return Err(AppError::new("Application CRD not found", "cluster")),
+        None => {
+            return Err(AppError::new(
+                "Application CRD not found",
+                AppErrorKind::Cluster,
+            ))
+        }
     };
 
     let obj = get_crd_object(client.clone(), &ar, &name, namespace.as_deref()).await?;
@@ -122,7 +128,7 @@ pub async fn get_argocd_application_details(
     let metadata = resource_metadata(&obj)?;
     let status = resource_status(&obj);
     let summary = application_summary_from_object(&cluster_context, &obj)
-        .ok_or_else(|| AppError::new("invalid application data", "cluster"))?;
+        .ok_or_else(|| AppError::new("invalid application data", AppErrorKind::Cluster))?;
 
     Ok(ArgoApplicationDetails {
         summary,

@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::{
     commands::helpers::list_params,
     commands::{
@@ -138,7 +139,7 @@ pub async fn list_resource_kinds(
                 err.message,
                 started.elapsed().as_millis()
             );
-            record_backend_error("list_resource_kinds", started, &err.kind);
+            record_backend_error("list_resource_kinds", started, err.kind.as_str());
         }
     }
     result
@@ -165,6 +166,10 @@ pub(crate) async fn present_custom_resource_kinds_for_catalog(
         .filter(|namespace| !namespace.trim().is_empty())
         .collect();
 
+    for namespace in &namespaces {
+        crate::commands::helpers::validate_namespace(Some(namespace))?;
+    }
+
     let outcomes = stream::iter(
         catalog
             .into_iter()
@@ -177,8 +182,10 @@ pub(crate) async fn present_custom_resource_kinds_for_catalog(
             match custom_resource_kind_present(client, &resource_kind, &namespaces).await {
                 Ok(true) => Ok(Some(resource_kind)),
                 Ok(false) => Ok(None),
-                Err(err) if err.kind == "notFound" => Ok(None),
-                Err(err) if err.kind == "forbidden" && !namespaces.is_empty() => Ok(None),
+                Err(err) if err.kind == AppErrorKind::NotFound => Ok(None),
+                Err(err) if err.kind == AppErrorKind::Forbidden && !namespaces.is_empty() => {
+                    Ok(None)
+                }
                 Err(err) => Err(err),
             }
         }
@@ -203,6 +210,7 @@ async fn custom_resource_kind_present(
     namespaces: &[String],
 ) -> Result<bool, AppError> {
     let api_resource = api_resource_from_kind(resource_kind);
+    crate::commands::helpers::validate_api_resource(&api_resource)?;
     let params = list_params().limit(1);
     if namespaces.is_empty() {
         let api: Api<DynamicObject> = Api::all_with(client, &api_resource);
@@ -221,7 +229,9 @@ async fn custom_resource_kind_present(
             Ok(_) => {}
             Err(err) => {
                 let app_error = AppError::from(err);
-                if app_error.kind == "forbidden" || app_error.kind == "notFound" {
+                if app_error.kind == AppErrorKind::Forbidden
+                    || app_error.kind == AppErrorKind::NotFound
+                {
                     continue;
                 }
                 return Err(app_error);
@@ -294,7 +304,11 @@ pub async fn list_present_custom_resource_kinds(
                 err.message,
                 started.elapsed().as_millis()
             );
-            record_backend_error("list_present_custom_resource_kinds", started, &err.kind);
+            record_backend_error(
+                "list_present_custom_resource_kinds",
+                started,
+                err.kind.as_str(),
+            );
         }
     }
     result
@@ -448,7 +462,7 @@ mod tests {
         let (result, ()) = tokio::join!(operation, responder);
         let error = result.expect_err("malformed response must fail");
 
-        assert_eq!(error.kind, "cluster");
+        assert_eq!(error.kind, AppErrorKind::Serialization);
     }
 
     #[tokio::test]
@@ -476,7 +490,7 @@ mod tests {
         let (result, ()) = tokio::join!(operation, responder);
         let error = result.expect_err("forbidden response must fail");
 
-        assert_eq!(error.kind, "forbidden");
+        assert_eq!(error.kind, AppErrorKind::Forbidden);
         assert!(error.message.contains("forbidden"));
     }
 }

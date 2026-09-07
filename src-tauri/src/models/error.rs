@@ -1,143 +1,203 @@
 use serde::{Deserialize, Serialize};
+use std::{error::Error, fmt, sync::Arc};
+
+#[derive(Debug, thiserror::Error)]
+#[error("workspace request cancelled")]
+pub(crate) struct WorkspaceRequestCancelled;
+
+/// Stable categories serialized at the frontend boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppErrorKind {
+    AdmissionDenied,
+    ArgoApi,
+    ArgoConnection,
+    ArgoInspection,
+    ArgoOperationUnavailable,
+    ArgoTunnel,
+    ArgoTunnelForbidden,
+    Cancelled,
+    Cluster,
+    ConfirmationRequired,
+    CredentialUnavailable,
+    FieldManagerConflict,
+    Forbidden,
+    ImmutableField,
+    Internal,
+    InvalidResource,
+    Io,
+    Kubeconfig,
+    LiveSessionTargetUnavailable,
+    Logs,
+    Network,
+    NotFound,
+    ProviderDiscoveryUnavailable,
+    Serialization,
+    Session,
+    Transport,
+    UnsupportedOperation,
+    #[serde(rename = "usage_metrics")]
+    UsageMetrics,
+    Validation,
+}
+
+impl AppErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmissionDenied => "admissionDenied",
+            Self::ArgoApi => "argoApi",
+            Self::ArgoConnection => "argoConnection",
+            Self::ArgoInspection => "argoInspection",
+            Self::ArgoOperationUnavailable => "argoOperationUnavailable",
+            Self::ArgoTunnel => "argoTunnel",
+            Self::ArgoTunnelForbidden => "argoTunnelForbidden",
+            Self::Cancelled => "cancelled",
+            Self::Cluster => "cluster",
+            Self::ConfirmationRequired => "confirmationRequired",
+            Self::CredentialUnavailable => "credentialUnavailable",
+            Self::FieldManagerConflict => "fieldManagerConflict",
+            Self::Forbidden => "forbidden",
+            Self::ImmutableField => "immutableField",
+            Self::Internal => "internal",
+            Self::InvalidResource => "invalidResource",
+            Self::Io => "io",
+            Self::Kubeconfig => "kubeconfig",
+            Self::LiveSessionTargetUnavailable => "liveSessionTargetUnavailable",
+            Self::Logs => "logs",
+            Self::Network => "network",
+            Self::NotFound => "notFound",
+            Self::ProviderDiscoveryUnavailable => "providerDiscoveryUnavailable",
+            Self::Serialization => "serialization",
+            Self::Session => "session",
+            Self::Transport => "transport",
+            Self::UnsupportedOperation => "unsupportedOperation",
+            Self::UsageMetrics => "usage_metrics",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+impl fmt::Display for AppErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {
     pub message: String,
-    pub kind: String,
+    pub kind: AppErrorKind,
+    // Sources stay in Rust, including when errors are cloned into read caches.
+    #[serde(skip)]
+    source: Option<Arc<dyn Error + Send + Sync>>,
 }
 
 impl AppError {
-    pub fn new(message: impl Into<String>, kind: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>, kind: AppErrorKind) -> Self {
         Self {
             message: message.into(),
-            kind: kind.into(),
+            kind,
+            source: None,
         }
     }
 
-    pub fn kube(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let kind = kube_message_kind(&message).unwrap_or("cluster");
-        Self::new(message, kind)
+    #[must_use]
+    pub fn with_source(mut self, source: impl Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Arc::new(source));
+        self
     }
 
     pub fn cancelled() -> Self {
-        Self::new("request cancelled", "cancelled")
+        Self::new("request cancelled", AppErrorKind::Cancelled)
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for AppError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
     }
 }
 
 impl From<kube::Error> for AppError {
-    fn from(e: kube::Error) -> Self {
-        let message = e.to_string();
-        let kind = kube_error_kind(&e)
-            .or_else(|| kube_message_kind(&message))
-            .unwrap_or("cluster");
-        Self::new(message, kind)
+    fn from(error: kube::Error) -> Self {
+        let kind = kube_error_kind(&error);
+        Self::new(error.to_string(), kind).with_source(error)
     }
 }
 
-fn kube_error_kind(error: &kube::Error) -> Option<&'static str> {
+impl From<kube::config::KubeconfigError> for AppError {
+    fn from(error: kube::config::KubeconfigError) -> Self {
+        Self::new(error.to_string(), AppErrorKind::Kubeconfig).with_source(error)
+    }
+}
+
+/// Classify transport failures by their types, never by remote message text.
+pub(crate) fn kube_error_kind(error: &kube::Error) -> AppErrorKind {
+    let mut current: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(source) = current {
+        if source.is::<WorkspaceRequestCancelled>() {
+            return AppErrorKind::Cancelled;
+        }
+        if let Some(error) = source.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind;
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::TimedOut
+                    | ErrorKind::AddrNotAvailable
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::HostUnreachable
+            ) {
+                return AppErrorKind::Network;
+            }
+        }
+        current = source.source();
+    }
     match error {
-        kube::Error::Api(status) => Some(status_kind(status)),
-        _ => None,
+        kube::Error::Api(status) => status_kind(status),
+        kube::Error::InferConfig(_) | kube::Error::InferKubeconfig(_) | kube::Error::Auth(_) => {
+            AppErrorKind::Kubeconfig
+        }
+        kube::Error::Discovery(_) => AppErrorKind::ProviderDiscoveryUnavailable,
+        kube::Error::SerdeError(_) | kube::Error::FromUtf8(_) => AppErrorKind::Serialization,
+        kube::Error::HyperError(_)
+        | kube::Error::Service(_)
+        | kube::Error::RustlsTls(_)
+        | kube::Error::TlsRequired => AppErrorKind::Network,
+        _ => AppErrorKind::Cluster,
     }
 }
 
-fn status_kind(status: &kube::core::Status) -> &'static str {
+fn status_kind(status: &kube::core::Status) -> AppErrorKind {
+    if status.details.as_ref().is_some_and(|details| {
+        details
+            .causes
+            .iter()
+            .any(|cause| cause.reason == "FieldManagerConflict")
+    }) {
+        return AppErrorKind::FieldManagerConflict;
+    }
     if status.code == 403 || status.reason == "Forbidden" {
-        return "forbidden";
+        return AppErrorKind::Forbidden;
     }
     if status.code == 404 || status.reason == "NotFound" {
-        return "notFound";
+        return AppErrorKind::NotFound;
     }
     if status.code == 422 || status.reason == "Invalid" {
-        if is_admission_status(status) {
-            return "admissionDenied";
-        }
-        return "invalidResource";
+        return AppErrorKind::InvalidResource;
     }
-    "cluster"
-}
-
-fn is_admission_status(status: &kube::core::Status) -> bool {
-    let message = status.message.to_ascii_lowercase();
-    message.contains("admission webhook")
-        || message.contains("denied the request")
-        || message.contains("violates")
-        || message.contains("podsecurity")
-}
-
-fn kube_message_kind(message: &str) -> Option<&'static str> {
-    let message = message.to_ascii_lowercase();
-    if message.contains("workspace request cancelled") || message.contains("request cancelled") {
-        return Some("cancelled");
-    }
-    if message.contains("fieldmanagerconflict")
-        || message.contains("field manager conflict")
-        || message.contains("apply failed with conflicts")
-    {
-        return Some("fieldManagerConflict");
-    }
-    if message.contains("pod updates may not change fields")
-        || message.contains("field is immutable")
-        || message.contains("fieldvalueforbidden")
-    {
-        return Some("immutableField");
-    }
-    if message.contains("admission webhook")
-        || message.contains("denied the request")
-        || message.contains("podsecurity")
-        || message.contains("violates")
-    {
-        return Some("admissionDenied");
-    }
-    if message.contains("forbidden") || message.contains("status 403") {
-        return Some("forbidden");
-    }
-    if message.contains("kubeconfig")
-        || message.contains("failed to infer config")
-        || message.contains("no configuration has been provided")
-        || message.contains("context ") && message.contains(" not found")
-    {
-        return Some("kubeconfig");
-    }
-    if message.contains("no ready pod")
-        || message.contains("no matching pod")
-        || message.contains("selector") && message.contains("matched no pod")
-        || message.contains("container") && message.contains("not found")
-        || message.contains("address already in use")
-        || message.contains("port-forward")
-    {
-        return Some("liveSessionTargetUnavailable");
-    }
-    if message.contains("discovery")
-        || message.contains("customresourcedefinition")
-        || message.contains("metrics.k8s.io")
-        || message.contains("metrics api")
-    {
-        return Some("providerDiscoveryUnavailable");
-    }
-    if message.contains("serialize")
-        || message.contains("serialization")
-        || message.contains("deserialize")
-        || message.contains("json")
-        || message.contains("yaml")
-    {
-        return Some("serialization");
-    }
-    if message.contains("not found") || message.contains("status 404") {
-        return Some("notFound");
-    }
-    if message.contains("connection refused")
-        || message.contains("connection reset")
-        || message.contains("timed out")
-        || message.contains("timeout")
-        || message.contains("unreachable")
-        || message.contains("i/o timeout")
-        || message.contains("dns")
-    {
-        return Some("network");
-    }
-    None
+    AppErrorKind::Cluster
 }
 
 #[cfg(test)]
@@ -148,73 +208,59 @@ mod tests {
     fn status(code: u16, reason: &str, message: &str) -> kube::Error {
         kube::Error::Api(Box::new(Status {
             code,
-            reason: reason.to_string(),
-            message: message.to_string(),
+            reason: reason.into(),
+            message: message.into(),
             ..Default::default()
         }))
     }
 
     #[test]
-    fn classifies_forbidden_status_errors() {
-        let err = AppError::from(status(403, "Forbidden", "pods is forbidden"));
-
-        assert_eq!(err.kind, "forbidden");
+    fn classifies_status_without_reading_message() {
+        for (code, reason, kind) in [
+            (403, "Forbidden", AppErrorKind::Forbidden),
+            (404, "NotFound", AppErrorKind::NotFound),
+            (422, "Invalid", AppErrorKind::InvalidResource),
+        ] {
+            assert_eq!(
+                AppError::from(status(code, reason, "untrusted description")).kind,
+                kind
+            );
+        }
     }
 
     #[test]
-    fn classifies_not_found_status_errors() {
-        let err = AppError::from(status(404, "NotFound", "pods \"gone\" not found"));
-
-        assert_eq!(err.kind, "notFound");
+    fn error_text_cannot_turn_transport_failure_into_forbidden() {
+        let error = kube::Error::Service(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "cannot connect to forbidden.example:403",
+        )));
+        assert_eq!(AppError::from(error).kind, AppErrorKind::Network);
     }
 
     #[test]
-    fn classifies_invalid_status_errors() {
-        let err = AppError::from(status(422, "Invalid", "Pod \"api\" is invalid"));
-
-        assert_eq!(err.kind, "invalidResource");
+    fn cancellation_survives_transport_wrapping_and_clone() {
+        let error = AppError::from(kube::Error::Service(Box::new(WorkspaceRequestCancelled)));
+        let cloned = error.clone();
+        assert_eq!(cloned.kind, AppErrorKind::Cancelled);
+        let source = cloned
+            .source()
+            .unwrap()
+            .downcast_ref::<kube::Error>()
+            .unwrap();
+        assert!(source.source().unwrap().is::<WorkspaceRequestCancelled>());
     }
 
     #[test]
-    fn classifies_admission_status_errors() {
-        let err = AppError::from(status(
-            422,
-            "Invalid",
-            "admission webhook \"policy\" denied the request",
-        ));
-
-        assert_eq!(err.kind, "admissionDenied");
-    }
-
-    #[test]
-    fn classifies_kubeconfig_message_errors() {
-        let err = AppError::kube("failed to infer config: kubeconfig missing");
-
-        assert_eq!(err.kind, "kubeconfig");
-
-        let err = AppError::kube("context admin@kind not found");
-
-        assert_eq!(err.kind, "kubeconfig");
-    }
-
-    #[test]
-    fn classifies_live_session_target_message_errors() {
-        let err = AppError::kube("no ready Pods matched this Service selector");
-
-        assert_eq!(err.kind, "liveSessionTargetUnavailable");
-    }
-
-    #[test]
-    fn classifies_provider_discovery_message_errors() {
-        let err = AppError::kube("metrics.k8s.io discovery unavailable");
-
-        assert_eq!(err.kind, "providerDiscoveryUnavailable");
-    }
-
-    #[test]
-    fn classifies_serialization_message_errors() {
-        let err = AppError::kube("failed to serialize resource yaml");
-
-        assert_eq!(err.kind, "serialization");
+    fn serialized_error_has_only_stable_message_and_kind() {
+        let error = AppError::new("safe description", AppErrorKind::Network)
+            .with_source(std::io::Error::other("backend-only detail"));
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"message":"safe description","kind":"network"})
+        );
+        let decoded: AppError = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.kind, AppErrorKind::Network);
+        assert!(decoded.source().is_none());
     }
 }

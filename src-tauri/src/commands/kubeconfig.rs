@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ClusterContext};
 use kube::{
     config::{KubeConfigOptions, Kubeconfig},
@@ -199,11 +200,11 @@ impl KubeconfigSource {
                 let (kubeconfig, _) = self.read_configured_kubeconfig()?;
                 Config::from_custom_kubeconfig(kubeconfig, &options)
                     .await
-                    .map_err(|err| AppError::kube(err.to_string()))
+                    .map_err(AppError::from)
             }
             None => Config::from_kubeconfig(&options)
                 .await
-                .map_err(|err| AppError::kube(err.to_string())),
+                .map_err(AppError::from),
         }
     }
 
@@ -265,7 +266,7 @@ impl KubeconfigSource {
         let Some(paths) = self.configured_paths()? else {
             return Kubeconfig::read()
                 .map(|kubeconfig| (kubeconfig, Vec::new()))
-                .map_err(|err| AppError::kube(err.to_string()));
+                .map_err(AppError::from);
         };
 
         let mut merged = Kubeconfig::default();
@@ -275,7 +276,11 @@ impl KubeconfigSource {
             match Kubeconfig::read_from(&configured.path) {
                 Ok(next) => {
                     merged = merged.merge(next).map_err(|err| {
-                        AppError::kube(format_kubeconfig_error(&self.env_var, err))
+                        AppError::new(
+                            format_kubeconfig_error(&self.env_var),
+                            AppErrorKind::Kubeconfig,
+                        )
+                        .with_source(err)
                     })?;
                     loaded += 1;
                 }
@@ -295,16 +300,18 @@ impl KubeconfigSource {
         if crate::e2e::is_enabled() {
             return Err(AppError::new(
                 "the isolated E2E kubeconfig became unavailable",
-                "validation",
+                AppErrorKind::Validation,
             ));
         }
 
         read_default_kubeconfig_without_env()
             .map(|kubeconfig| (kubeconfig, warnings))
             .map_err(|err| {
-                AppError::kube(format!(
-                    "no usable kubeconfig sources and default discovery failed: {err}"
-                ))
+                AppError::new(
+                    format!("no usable kubeconfig sources and default discovery failed: {err}"),
+                    AppErrorKind::Kubeconfig,
+                )
+                .with_source(err)
             })
     }
 }
@@ -437,7 +444,7 @@ fn validate_env_var_name(env_var: &str) -> Result<(), AppError> {
 fn invalid_env_var_error() -> AppError {
     AppError::new(
         "kubeconfig env var name must contain only ASCII letters, numbers, and underscores, and cannot start with a number",
-        "validation",
+        AppErrorKind::Validation,
     )
 }
 
@@ -479,7 +486,7 @@ fn standard_kubeconfig_paths() -> Vec<ConfiguredKubeconfigPath> {
         .collect()
 }
 
-fn format_kubeconfig_error(env_var: &str, _err: kube::config::KubeconfigError) -> String {
+fn format_kubeconfig_error(env_var: &str) -> String {
     format!("failed to load kubeconfig from {env_var}")
 }
 
@@ -500,13 +507,17 @@ fn load_persisted_sources() -> Result<PersistedKubeconfigSources, AppError> {
     }
     let settings = if path.exists() {
         let content = fs::read_to_string(&path).map_err(|err| {
-            AppError::new(format!("failed to read kubeconfig sources: {err}"), "io")
+            AppError::new(
+                format!("failed to read kubeconfig sources: {err}"),
+                AppErrorKind::Io,
+            )
         })?;
         serde_json::from_str(&content).map_err(|err| {
             AppError::new(
                 format!("failed to parse kubeconfig sources settings: {err}"),
-                "validation",
+                AppErrorKind::Validation,
             )
+            .with_source(err)
         })?
     } else {
         PersistedKubeconfigSources::default()
@@ -523,21 +534,24 @@ fn save_persisted_sources(settings: &PersistedKubeconfigSources) -> Result<(), A
         fs::create_dir_all(parent).map_err(|err| {
             AppError::new(
                 format!("failed to create kubeconfig sources directory: {err}"),
-                "io",
+                AppErrorKind::Io,
             )
+            .with_source(err)
         })?;
     }
     let content = serde_json::to_string_pretty(settings).map_err(|err| {
         AppError::new(
             format!("failed to serialize kubeconfig sources settings: {err}"),
-            "validation",
+            AppErrorKind::Validation,
         )
+        .with_source(err)
     })?;
     fs::write(&path, content).map_err(|err| {
         AppError::new(
             format!("failed to write kubeconfig sources settings: {err}"),
-            "io",
+            AppErrorKind::Io,
         )
+        .with_source(err)
     })?;
     *SETTINGS_CACHE.write().expect("settings cache lock") = Some(settings.clone());
     Ok(())

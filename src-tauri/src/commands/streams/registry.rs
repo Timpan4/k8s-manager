@@ -172,7 +172,12 @@ impl StreamRegistry {
         (watch_key, broadcaster, started)
     }
 
-    pub(super) fn set_resource_handle(&self, key: &str, handle: JoinHandle<()>) {
+    pub(super) fn set_resource_handle(
+        &self,
+        key: &str,
+        broadcaster: &StreamBroadcaster,
+        handle: JoinHandle<()>,
+    ) {
         if let Some(watch) = self
             .state
             .lock()
@@ -180,8 +185,14 @@ impl StreamRegistry {
             .resource_watches
             .get_mut(key)
         {
-            watch.handle = Some(handle);
+            if Arc::ptr_eq(&watch.broadcaster.subscribers, &broadcaster.subscribers)
+                && watch.handle.is_none()
+            {
+                watch.handle = Some(handle);
+                return;
+            }
         }
+        handle.abort();
     }
 
     pub(super) fn subscribe_event(
@@ -221,7 +232,12 @@ impl StreamRegistry {
         (watch_key, broadcaster, started)
     }
 
-    pub(super) fn set_event_handle(&self, key: &str, handle: JoinHandle<()>) {
+    pub(super) fn set_event_handle(
+        &self,
+        key: &str,
+        broadcaster: &StreamBroadcaster,
+        handle: JoinHandle<()>,
+    ) {
         if let Some(watch) = self
             .state
             .lock()
@@ -229,8 +245,14 @@ impl StreamRegistry {
             .event_watches
             .get_mut(key)
         {
-            watch.handle = Some(handle);
+            if Arc::ptr_eq(&watch.broadcaster.subscribers, &broadcaster.subscribers)
+                && watch.handle.is_none()
+            {
+                watch.handle = Some(handle);
+                return;
+            }
         }
+        handle.abort();
     }
 
     pub(super) fn insert_handles(&self, stream_id: String, handles: Vec<JoinHandle<()>>) {
@@ -352,6 +374,77 @@ fn event_watch_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_task() -> (JoinHandle<()>, tokio::sync::oneshot::Receiver<()>) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        });
+        (JoinHandle::Tokio(handle), receiver)
+    }
+
+    #[tokio::test]
+    async fn aborted_or_replaced_watch_cannot_detach_or_overwrite_a_task() {
+        for resource in [true, false] {
+            let registry = StreamRegistry::default();
+            let old = StreamBroadcaster::new();
+            let current = StreamBroadcaster::new();
+            let set_handle = |broadcaster: &StreamBroadcaster, handle| {
+                if resource {
+                    registry.set_resource_handle("key", broadcaster, handle);
+                } else {
+                    registry.set_event_handle("key", broadcaster, handle);
+                }
+            };
+            let (handle, stopped) = pending_task();
+            set_handle(&old, handle);
+            assert!(
+                stopped.await.is_err(),
+                "unregistered task must be cancelled"
+            );
+
+            {
+                let mut state = registry.state.lock().unwrap();
+                let watches = if resource {
+                    &mut state.resource_watches
+                } else {
+                    &mut state.event_watches
+                };
+                watches.insert(
+                    "key".into(),
+                    SharedWatch {
+                        broadcaster: current.clone(),
+                        handle: None,
+                    },
+                );
+            }
+            let (handle, retained) = pending_task();
+            let retained_id = handle.inner().id();
+            set_handle(&current, handle);
+            for broadcaster in [&old, &current] {
+                let (handle, stopped) = pending_task();
+                set_handle(broadcaster, handle);
+                assert!(
+                    stopped.await.is_err(),
+                    "stale and duplicate tasks must be cancelled"
+                );
+            }
+            {
+                let mut state = registry.state.lock().unwrap();
+                let watches = if resource {
+                    &mut state.resource_watches
+                } else {
+                    &mut state.event_watches
+                };
+                let watch = watches.remove("key").unwrap();
+                let handle = watch.handle.unwrap();
+                assert_eq!(handle.inner().id(), retained_id);
+                handle.abort();
+            }
+            assert!(retained.await.is_err());
+        }
+    }
 
     fn pod_key(namespace: Option<&str>) -> WatchResourceKey {
         WatchResourceKey {

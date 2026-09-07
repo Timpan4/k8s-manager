@@ -3,6 +3,7 @@ use super::{
     topology::{input_from_metadata, TopologyInputResource},
 };
 use crate::commands::helpers::{extract_owner_ref_summary, list_params};
+use crate::models::AppErrorKind;
 use crate::models::{AppError, DiscoveredResourceKind};
 use futures_util::{stream, StreamExt};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -37,7 +38,7 @@ where
 }
 
 fn is_optional_app_error(error: &AppError) -> bool {
-    matches!(error.kind.as_str(), "forbidden" | "notFound")
+    matches!(error.kind, AppErrorKind::Forbidden | AppErrorKind::NotFound)
 }
 
 fn is_optional_topology_list_error(error: &KubeError) -> bool {
@@ -67,8 +68,9 @@ async fn dynamic_list_permit(
     limiter.clone().acquire_owned().await.map_err(|err| {
         AppError::new(
             format!("dynamic topology limiter closed: {err}"),
-            "internal",
+            AppErrorKind::Internal,
         )
+        .with_source(err)
     })
 }
 
@@ -95,7 +97,7 @@ pub(super) async fn list_crd_definition_inputs(
             ));
             Ok(Vec::new())
         }
-        Err(error) => Err(AppError::kube(error.to_string())),
+        Err(error) => Err(AppError::from(error)),
     }
 }
 

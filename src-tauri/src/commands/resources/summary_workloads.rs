@@ -50,7 +50,7 @@ async fn deployment_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|deploy| {
             let mut summary = base_resource_summary(
@@ -87,7 +87,7 @@ async fn replicaset_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|rs| {
             let mut summary = base_resource_summary(
@@ -122,7 +122,7 @@ async fn statefulset_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|ss| {
             let mut summary = base_resource_summary(
@@ -153,7 +153,7 @@ async fn daemonset_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|ds| {
             let mut summary = base_resource_summary(
@@ -187,7 +187,7 @@ async fn ingress_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|ing| {
             let mut summary = base_resource_summary(
@@ -216,7 +216,7 @@ async fn job_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|job| {
             let mut summary = base_resource_summary(
@@ -263,7 +263,7 @@ async fn cronjob_summaries(
     Ok(api
         .list(&list_params())
         .await
-        .map_err(|e| AppError::kube(e.to_string()))?
+        .map_err(AppError::from)?
         .iter()
         .map(|cj| {
             let mut summary = base_resource_summary(

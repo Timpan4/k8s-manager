@@ -32,7 +32,8 @@ pub use cancellation::{CancelBackendRequestsResult, CancelWorkspaceRequestsResul
 pub use cluster::ClusterContext;
 pub use diagnostics::{BackendDiagnosticEvent, BackendDiagnosticField, BackendDiagnosticStatus};
 pub use discovery::DiscoveredResourceKind;
-pub use error::AppError;
+pub(crate) use error::{kube_error_kind, WorkspaceRequestCancelled};
+pub use error::{AppError, AppErrorKind};
 pub use events::ResourceEventSummary;
 pub use flux::{
     FluxDetectionSummary, FluxInventoryResource, FluxResourceDetails, FluxResourceKind,

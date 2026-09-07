@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PortForwardRequest, PortForwardSessionSummary};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{api::Api, Client};
@@ -24,12 +25,24 @@ pub(crate) fn should_retry_accept(consecutive_failures: u32) -> bool {
     consecutive_failures < MAX_CONSECUTIVE_ACCEPT_FAILURES
 }
 
-pub(crate) fn port_forward_error_message(err: kube::Error) -> String {
-    let message = err.to_string();
-    if message.to_ascii_lowercase().contains("forbidden") {
-        return format!("port-forward forbidden by Kubernetes RBAC: {message}");
+fn port_forward_error(err: kube::Error) -> AppError {
+    let mut error = AppError::from(err);
+    if error.kind == AppErrorKind::Forbidden {
+        error.message = format!(
+            "port-forward forbidden by Kubernetes RBAC: {}",
+            error.message
+        );
     }
-    message
+    error
+}
+
+// kube's Portforwarder does not abort its task on drop.
+struct OwnedPortforwarder(kube::api::Portforwarder);
+
+impl Drop for OwnedPortforwarder {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn verify_pod_port_forward(
@@ -41,10 +54,9 @@ async fn verify_pod_port_forward(
         .portforward(&target.pod_name, &[target.pod_port])
         .await
         .map_err(|err| {
-            AppError::new(
-                port_forward_error_message(err),
-                "liveSessionTargetUnavailable",
-            )
+            let mut error = port_forward_error(err);
+            error.kind = AppErrorKind::LiveSessionTargetUnavailable;
+            error
         })?;
     forwarder.abort();
     Ok(())
@@ -56,46 +68,47 @@ pub(crate) async fn forward_pod_connection(
     pod_name: String,
     pod_port: u16,
     mut local_stream: TcpStream,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let pods: Api<Pod> = Api::namespaced(client, &namespace);
-    let mut forwarder = pods
-        .portforward(&pod_name, &[pod_port])
-        .await
-        .map_err(port_forward_error_message)?;
-    let mut pod_stream = forwarder
-        .take_stream(pod_port)
-        .ok_or_else(|| format!("remote port {pod_port} did not open"))?;
-    let error_future = forwarder.take_error(pod_port);
-
+    let mut forwarder = OwnedPortforwarder(
+        pods.portforward(&pod_name, &[pod_port])
+            .await
+            .map_err(port_forward_error)?,
+    );
+    let mut pod_stream = forwarder.0.take_stream(pod_port).ok_or_else(|| {
+        AppError::new(
+            format!("remote port {pod_port} did not open"),
+            AppErrorKind::Session,
+        )
+    })?;
+    let error_future = forwarder.0.take_error(pod_port);
+    let copy = copy_bidirectional(&mut local_stream, &mut pod_stream);
+    tokio::pin!(copy);
     let result = if let Some(error_future) = error_future {
         tokio::pin!(error_future);
         tokio::select! {
-            copy_result = copy_bidirectional(&mut local_stream, &mut pod_stream) => {
-                copy_result.map(|_| ()).map_err(|err| err.to_string())
-            }
+            copy_result = &mut copy => copy_result,
             port_error = &mut error_future => {
                 match port_error {
-                    Some(message) if !message.trim().is_empty() => Err(message),
-                    _ => Ok(()),
+                    Some(message) if !message.trim().is_empty() => return Err(AppError::new(message, AppErrorKind::Session)),
+                    // Closing the diagnostic channel does not complete data transfer.
+                    _ => copy.await,
                 }
             }
         }
     } else {
-        copy_bidirectional(&mut local_stream, &mut pod_stream)
-            .await
-            .map(|_| ())
-            .map_err(|err| err.to_string())
+        copy.await
     };
-
-    forwarder.abort();
-    result
+    result.map(|_| ()).map_err(|error| {
+        AppError::new("Port-forward data transfer failed", AppErrorKind::Io).with_source(error)
+    })
 }
 
 async fn forward_connection(
     client: Client,
     target: PortForwardTarget,
     local_stream: TcpStream,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     forward_pod_connection(
         client,
         target.namespace,
@@ -112,11 +125,9 @@ async fn resolve_and_forward_connection(
     local_stream: TcpStream,
     session_id: String,
     registry: PortForwardRegistry,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     registry.mark_status(&session_id, "reconnecting", None);
-    let target = resolve_port_forward_target(request)
-        .await
-        .map_err(|err| err.message)?;
+    let target = resolve_port_forward_target(request).await?;
     registry.mark_resolved_target(&session_id, &target);
     registry.mark_status(&session_id, "connected", None);
     forward_connection(client, target, local_stream).await
@@ -129,7 +140,7 @@ pub(super) async fn run_port_forward_session<H, F>(
     handle_connection: H,
 ) where
     H: Fn(TcpStream) -> F + Send + 'static,
-    F: Future<Output = Result<(), String>> + Send + 'static,
+    F: Future<Output = Result<(), AppError>> + Send + 'static,
 {
     let mut connections = JoinSet::new();
     let mut consecutive_accept_failures: u32 = 0;
@@ -166,7 +177,7 @@ pub(super) async fn run_port_forward_session<H, F>(
                         }
                     }
                     Some(Ok(Err(message))) => {
-                        registry.mark_error(&session_id, message);
+                        registry.mark_error(&session_id, message.message);
                     }
                     Some(Err(err)) => {
                         registry.mark_error(&session_id, err.to_string());
@@ -187,7 +198,7 @@ pub(super) async fn start_pod_port_forward_in_registry(
         if registry.has_local_port(local_port) {
             return Err(AppError::new(
                 format!("local port {local_port} is already forwarded"),
-                "liveSessionTargetUnavailable",
+                AppErrorKind::LiveSessionTargetUnavailable,
             ));
         }
     }
@@ -198,7 +209,7 @@ pub(super) async fn start_pod_port_forward_in_registry(
         .map_err(|err| {
             AppError::new(
                 format!("local port unavailable: {err}"),
-                "liveSessionTargetUnavailable",
+                AppErrorKind::LiveSessionTargetUnavailable,
             )
         })?;
     let local_port = listener
@@ -206,14 +217,15 @@ pub(super) async fn start_pod_port_forward_in_registry(
         .map_err(|err| {
             AppError::new(
                 format!("local port unavailable: {err}"),
-                "liveSessionTargetUnavailable",
+                AppErrorKind::LiveSessionTargetUnavailable,
             )
+            .with_source(err)
         })?
         .port();
     if registry.has_local_port(local_port) {
         return Err(AppError::new(
             format!("local port {local_port} is already forwarded"),
-            "liveSessionTargetUnavailable",
+            AppErrorKind::LiveSessionTargetUnavailable,
         ));
     }
 

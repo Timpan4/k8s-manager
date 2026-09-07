@@ -57,7 +57,7 @@ async fn spawn_session_with_handler<H, F>(
 ) -> (String, u16)
 where
     H: Fn(TcpStream) -> F + Send + 'static,
-    F: Future<Output = Result<(), String>> + Send + 'static,
+    F: Future<Output = Result<(), AppError>> + Send + 'static,
 {
     let listener = TcpListener::bind((LOCAL_ADDRESS, 0))
         .await
@@ -369,7 +369,7 @@ async fn handler_error_marks_session_error_but_keeps_accepting() {
             async move {
                 let call_index = handler_count.fetch_add(1, Ordering::Relaxed);
                 if call_index == 0 {
-                    Err("boom".to_string())
+                    Err(AppError::new("boom", crate::models::AppErrorKind::Session))
                 } else {
                     Ok(())
                 }

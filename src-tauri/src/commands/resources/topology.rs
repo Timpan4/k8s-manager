@@ -10,6 +10,7 @@ use crate::commands::{
     kubeconfig::{kubeconfig_source_key, KubeconfigSource},
     BackendCancellationRegistry, ClusterLiveStore,
 };
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, DiscoveredResourceKind, OwnerReferenceSummary, ResourceSummary, ResourceTopology,
     TopologyEdge, TopologyNode, TopologyRelation,
@@ -44,7 +45,7 @@ impl TopologyMode {
             "networkFlow" => Ok(Self::NetworkFlow),
             value => Err(AppError::new(
                 format!("unsupported topology mode: {value}"),
-                "validation",
+                AppErrorKind::Validation,
             )),
         }
     }
@@ -318,6 +319,9 @@ pub async fn resource_topology_from(
     custom_resource_kinds: Option<Vec<DiscoveredResourceKind>>,
     custom_resource_kinds_are_present: bool,
 ) -> Result<ResourceTopology, AppError> {
+    for namespace in &namespaces {
+        crate::commands::helpers::validate_namespace(Some(namespace))?;
+    }
     let mode = TopologyMode::parse(mode)?;
     let source = KubeconfigSource::new(kubeconfig_env_var)?;
     let client = source.client_for_context(&cluster_context).await?;
@@ -432,7 +436,7 @@ pub async fn list_resource_topology(
                 started.elapsed().as_millis()
             );
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!(
                 "[kubecove:backend] list_resource_topology cancelled context={} namespaces={} mode={} ms={}",
                 cluster_context,

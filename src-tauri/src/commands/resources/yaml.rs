@@ -8,6 +8,7 @@ use crate::commands::{
     kubeconfig::KubeconfigSource,
     BackendCancellationRegistry,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, YamlEncoding, YamlViewMode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use kube::Api;
@@ -23,18 +24,20 @@ pub async fn reveal_secret_data_value(
     kubeconfig_env_var: Option<String>,
 ) -> Result<String, AppError> {
     let source = KubeconfigSource::new(kubeconfig_env_var)?;
+    crate::commands::helpers::validate_namespace(Some(&namespace))?;
+    crate::commands::helpers::validate_path_segment(&name, "Secret name")?;
     let secret = Api::<k8s_openapi::api::core::v1::Secret>::namespaced(
         source.client_for_context(&cluster_context).await?,
         &namespace,
     )
     .get(&name)
     .await
-    .map_err(|error| AppError::kube(error.to_string()))?;
+    .map_err(AppError::from)?;
     let value = secret
         .data
         .as_ref()
         .and_then(|data| data.get(&key))
-        .ok_or_else(|| AppError::new("selected Secret key was not found", "cluster"))?;
+        .ok_or_else(|| AppError::new("selected Secret key was not found", AppErrorKind::Cluster))?;
     Ok(STANDARD.encode(&value.0))
 }
 
@@ -167,7 +170,7 @@ pub async fn resource_yaml_from(
         }
         _ => Err(AppError::new(
             format!("unsupported resource kind: {kind}"),
-            "cluster",
+            AppErrorKind::Cluster,
         )),
     }
 }
@@ -209,7 +212,7 @@ pub async fn get_resource_yaml(
         Ok(yaml) => {
             eprintln!("[kubecove:backend] get_resource_yaml done context={} kind={} namespace={} name={} bytes={} ms={}", cluster_context, kind, namespace_label, name, yaml.len(), started.elapsed().as_millis());
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!("[kubecove:backend] get_resource_yaml cancelled context={} kind={} namespace={} name={} ms={}", cluster_context, kind, namespace_label, name, started.elapsed().as_millis());
         }
         Err(err) => {

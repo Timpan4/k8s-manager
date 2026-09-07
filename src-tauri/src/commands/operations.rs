@@ -1,4 +1,5 @@
 use crate::commands::kubeconfig::KubeconfigSource;
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, ClusterOperationPreview, ClusterOperationResult, ClusterOperationTarget,
     DeleteResourceRequest, RolloutRestartRequest, ScaleWorkloadRequest,
@@ -59,7 +60,12 @@ pub async fn preview_rollout_restart(
 ) -> Result<ClusterOperationPreview, AppError> {
     let target = validate_restart(&request)?;
     let client = client_for(&target, request.kubeconfig_env_var).await?;
-    restart_with_params(resource_api(client, &target)?, &target, preview_patch_params()).await?;
+    restart_with_params(
+        resource_api(client, &target)?,
+        &target,
+        preview_patch_params(),
+    )
+    .await?;
     Ok(ClusterOperationPreview {
         effect: format!(
             "Restart {} by updating its pod template",
@@ -152,7 +158,7 @@ fn validate_scale(request: &ScaleWorkloadRequest) -> Result<ClusterOperationTarg
     if request.replicas < 0 {
         return Err(AppError::new(
             "replicas must be zero or greater",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     Ok(request.target.clone())
@@ -169,19 +175,21 @@ fn validate_delete(request: &DeleteResourceRequest) -> Result<ClusterOperationTa
 }
 
 fn validate_target(target: &ClusterOperationTarget, supported: &[&str]) -> Result<(), AppError> {
+    crate::commands::helpers::validate_namespace(target.namespace.as_deref())?;
+    crate::commands::helpers::validate_path_segment(&target.name, "name")?;
     if target.cluster_context.trim().is_empty()
         || target.name.trim().is_empty()
         || target.namespace.as_deref().is_none_or(str::is_empty)
     {
         return Err(AppError::new(
             "context, namespace, and name are required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if !supported.contains(&target.kind.as_str()) {
         return Err(AppError::new(
             format!("{} is not supported for this operation", target.kind),
-            "unsupportedOperation",
+            AppErrorKind::UnsupportedOperation,
         ));
     }
     Ok(())
@@ -193,7 +201,7 @@ fn require_confirmation(confirmed: bool) -> Result<(), AppError> {
     } else {
         Err(AppError::new(
             "explicit confirmation is required",
-            "confirmationRequired",
+            AppErrorKind::ConfirmationRequired,
         ))
     }
 }
@@ -220,7 +228,7 @@ fn api_resource_for_kind(kind: &str) -> Result<ApiResource, AppError> {
         _ => {
             return Err(AppError::new(
                 "unsupported operation target",
-                "unsupportedOperation",
+                AppErrorKind::UnsupportedOperation,
             ))
         }
     };
@@ -264,6 +272,16 @@ fn target_label(target: &ClusterOperationTarget) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn operation_target_cannot_redirect_the_resource_path() {
+        let mut target = target("ConfigMap");
+        target.namespace = Some("default/secrets/token?ignored=".into());
+        assert!(validate_target(&target, &["ConfigMap"]).is_err());
+        target.namespace = Some("default".into());
+        target.name = "../secrets/token".into();
+        assert!(validate_target(&target, &["ConfigMap"]).is_err());
+    }
+
     fn target(kind: &str) -> ClusterOperationTarget {
         ClusterOperationTarget {
             cluster_context: "kind-dev".to_string(),
@@ -281,7 +299,7 @@ mod tests {
             kubeconfig_env_var: None,
         };
         let error = validate_delete(&request).unwrap_err();
-        assert_eq!(error.kind, "unsupportedOperation");
+        assert_eq!(error.kind, AppErrorKind::UnsupportedOperation);
     }
 
     #[test]
@@ -292,10 +310,13 @@ mod tests {
             confirmed: false,
             kubeconfig_env_var: None,
         };
-        assert_eq!(validate_scale(&request).unwrap_err().kind, "validation");
+        assert_eq!(
+            validate_scale(&request).unwrap_err().kind,
+            AppErrorKind::Validation
+        );
         assert_eq!(
             require_confirmation(false).unwrap_err().kind,
-            "confirmationRequired"
+            AppErrorKind::ConfirmationRequired
         );
     }
 
@@ -325,6 +346,6 @@ mod tests {
             assert_eq!(resource.plural, plural);
         }
         let error = api_resource_for_kind("Secret").unwrap_err();
-        assert_eq!(error.kind, "unsupportedOperation");
+        assert_eq!(error.kind, AppErrorKind::UnsupportedOperation);
     }
 }

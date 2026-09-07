@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 mod health;
 mod restarts;
 
@@ -121,8 +122,7 @@ pub async fn incident_cockpit_from(
 }
 
 fn is_forbidden_app_error(error: &AppError) -> bool {
-    let message = error.message.to_ascii_lowercase();
-    message.contains("forbidden") || message.contains("403")
+    error.kind == AppErrorKind::Forbidden
 }
 
 #[derive(Debug, Clone)]
@@ -493,6 +493,12 @@ mod tests {
     use super::*;
     use crate::commands::helpers::update_resource_health;
     use crate::models::{HealthAssessmentState, ResourceHealth};
+
+    #[test]
+    fn permission_classification_uses_kind_not_resource_name() {
+        let error = AppError::new("pod forbidden-403 not found", AppErrorKind::NotFound);
+        assert!(!is_forbidden_app_error(&error));
+    }
 
     fn resource(name: &str) -> ResourceSummary {
         let mut resource = ResourceSummary {

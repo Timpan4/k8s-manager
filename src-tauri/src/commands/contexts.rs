@@ -27,7 +27,7 @@ pub fn list_kube_contexts(
             started,
             vec![diagnostic_field("rows", rows.len())],
         ),
-        Err(err) => record_backend_error("list_kube_contexts", started, &err.kind),
+        Err(err) => record_backend_error("list_kube_contexts", started, err.kind.as_str()),
     }
     result
 }

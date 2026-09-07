@@ -8,6 +8,7 @@ use crate::commands::{
     },
     kubeconfig::KubeconfigSource,
 };
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, HelmManifestResourceSummary, HelmManifestSummary, HelmReleaseDetails,
     HelmReleaseSummary, HelmValuesSummary, YamlEncoding, YamlViewMode,
@@ -25,6 +26,10 @@ use std::{collections::BTreeMap, io::Read};
 const HELM_OWNER_SELECTOR: &str = "owner=helm";
 const HELM_STORAGE_SECRET: &str = "Secret";
 const HELM_STORAGE_CONFIGMAP: &str = "ConfigMap";
+// Kubernetes limits Secret and ConfigMap data to 1 MiB. The decoded budget is
+// the separately approved application limit, including gzip expansion.
+const MAX_STORED_RELEASE_BYTES: usize = 1024 * 1024;
+const MAX_DECODED_RELEASE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DecodedHelmRelease {
@@ -58,6 +63,7 @@ struct DecodedHelmChartMetadata {
 
 #[derive(Debug, Clone)]
 pub(super) struct HelmStorageRecord {
+    decode_error: Option<AppError>,
     pub(super) summary: HelmReleaseSummary,
     pub(super) release: Option<serde_json::Value>,
     pub(super) values_summary: HelmValuesSummary,
@@ -78,16 +84,16 @@ pub async fn list_helm_releases(
 
     match list_secret_releases(client.clone(), &cluster_context, &fallback_namespaces).await {
         Ok(mut releases) => records.append(&mut releases),
-        Err(err) => errors.push(err.message),
+        Err(err) => errors.push(err),
     }
 
     match list_configmap_releases(client, &cluster_context, &fallback_namespaces).await {
         Ok(mut releases) => records.append(&mut releases),
-        Err(err) => errors.push(err.message),
+        Err(err) => errors.push(err),
     }
 
     if records.is_empty() && !errors.is_empty() {
-        return Err(AppError::kube(errors.join("; ")));
+        return Err(storage_errors(errors));
     }
 
     Ok(latest_releases(records))
@@ -115,6 +121,9 @@ pub async fn get_helm_release_details(
         yaml_encoding.unwrap_or_default(),
     )
     .await?;
+    if let Some(error) = record.decode_error {
+        return Err(error);
+    }
     Ok(HelmReleaseDetails {
         summary: record.summary,
         yaml,
@@ -142,6 +151,9 @@ pub(super) async fn get_helm_storage_record(
         YamlEncoding::Yaml,
     )
     .await?;
+    if let Some(error) = record.decode_error {
+        return Err(error);
+    }
     Ok(record)
 }
 
@@ -154,6 +166,8 @@ async fn release_storage_object(
     yaml_view_mode: YamlViewMode,
     yaml_encoding: YamlEncoding,
 ) -> Result<(HelmStorageRecord, serde_json::Value, String), AppError> {
+    crate::commands::helpers::validate_namespace(Some(namespace))?;
+    crate::commands::helpers::validate_path_segment(storage_name, "Helm storage name")?;
     match storage_kind {
         HELM_STORAGE_SECRET => {
             let api: Api<Secret> = Api::namespaced(client, namespace);
@@ -161,12 +175,13 @@ async fn release_storage_object(
             if !is_helm_owned(secret.metadata.labels.as_ref()) {
                 return Err(AppError::new(
                     "storage object is not a Helm release",
-                    "validation",
+                    AppErrorKind::Validation,
                 ));
             }
             let record = secret_record(cluster_context, &mut secret)?;
-            let metadata = serde_json::to_value(&secret.metadata)
-                .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+            let metadata = serde_json::to_value(&secret.metadata).map_err(|e| {
+                AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e)
+            })?;
             redact_secret_release(&mut secret);
             let yaml = serialize_resource_document(&secret, yaml_view_mode, yaml_encoding)?;
             Ok((record, metadata, yaml))
@@ -177,17 +192,21 @@ async fn release_storage_object(
             if !is_helm_owned(configmap.metadata.labels.as_ref()) {
                 return Err(AppError::new(
                     "storage object is not a Helm release",
-                    "validation",
+                    AppErrorKind::Validation,
                 ));
             }
             let record = configmap_record(cluster_context, &mut configmap)?;
-            let metadata = serde_json::to_value(&configmap.metadata)
-                .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+            let metadata = serde_json::to_value(&configmap.metadata).map_err(|e| {
+                AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e)
+            })?;
             redact_configmap_release(&mut configmap);
             let yaml = serialize_resource_document(&configmap, yaml_view_mode, yaml_encoding)?;
             Ok((record, metadata, yaml))
         }
-        _ => Err(AppError::new("unsupported Helm storage kind", "validation")),
+        _ => Err(AppError::new(
+            "unsupported Helm storage kind",
+            AppErrorKind::Validation,
+        )),
     }
 }
 
@@ -232,11 +251,7 @@ async fn list_secret_releases(
             return list_secret_releases_by_namespace(client, cluster_context, fallback_namespaces)
                 .await
                 .map_err(|namespace_error| {
-                    AppError::kube(format!(
-                        "{}; {}",
-                        AppError::from(all_error).message,
-                        namespace_error.message
-                    ))
+                    storage_errors(vec![AppError::from(all_error), namespace_error])
                 });
         }
     };
@@ -264,11 +279,7 @@ async fn list_configmap_releases(
             )
             .await
             .map_err(|namespace_error| {
-                AppError::kube(format!(
-                    "{}; {}",
-                    AppError::from(all_error).message,
-                    namespace_error.message
-                ))
+                storage_errors(vec![AppError::from(all_error), namespace_error])
             });
         }
     };
@@ -298,12 +309,16 @@ async fn list_secret_releases_by_namespace(
                     records.push(secret_record(cluster_context, &mut secret)?);
                 }
             }
-            Err(err) => errors.push(format!("{}: {}", namespace, AppError::from(err).message)),
+            Err(err) => {
+                let mut error = AppError::from(err);
+                error.message = format!("{namespace}: {}", error.message);
+                errors.push(error);
+            }
         }
     }
 
     if !succeeded && !errors.is_empty() {
-        Err(AppError::kube(errors.join("; ")))
+        Err(storage_errors(errors))
     } else {
         Ok(records)
     }
@@ -328,15 +343,53 @@ async fn list_configmap_releases_by_namespace(
                     records.push(configmap_record(cluster_context, &mut configmap)?);
                 }
             }
-            Err(err) => errors.push(format!("{}: {}", namespace, AppError::from(err).message)),
+            Err(err) => {
+                let mut error = AppError::from(err);
+                error.message = format!("{namespace}: {}", error.message);
+                errors.push(error);
+            }
         }
     }
 
     if !succeeded && !errors.is_empty() {
-        Err(AppError::kube(errors.join("; ")))
+        Err(storage_errors(errors))
     } else {
         Ok(records)
     }
+}
+
+#[derive(Debug)]
+struct StorageErrors(Vec<AppError>);
+
+impl std::fmt::Display for StorageErrors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, error) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            std::fmt::Display::fmt(error, formatter)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StorageErrors {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.first().map(|error| error as &dyn std::error::Error)
+    }
+}
+
+fn storage_errors(errors: Vec<AppError>) -> AppError {
+    let kind = errors
+        .first()
+        .map_or(AppErrorKind::Cluster, |error| error.kind);
+    let kind = if errors.iter().all(|error| error.kind == kind) {
+        kind
+    } else {
+        AppErrorKind::Cluster
+    };
+    let source = StorageErrors(errors);
+    AppError::new(source.to_string(), kind).with_source(source)
 }
 
 fn helm_list_params() -> ListParams {
@@ -352,7 +405,11 @@ fn secret_record(
         .as_ref()
         .and_then(|data| data.get("release"))
         .map(|data| data.0.as_slice());
-    let decoded = release_data.and_then(decode_helm_release);
+    let decoded = release_data.map(decode_helm_release).transpose();
+    let (decoded, decode_error) = match decoded {
+        Ok(decoded) => (decoded, None),
+        Err(error) => (None, Some(error)),
+    };
     let release = decoded.as_ref().and_then(safe_release_metadata);
     let values_summary =
         values_summary(decoded.as_ref().and_then(|release| release.config.as_ref()));
@@ -371,6 +428,7 @@ fn secret_record(
         decoded.as_ref(),
     )?;
     Ok(HelmStorageRecord {
+        decode_error,
         summary,
         release,
         values_summary,
@@ -388,7 +446,11 @@ fn configmap_record(
         .as_ref()
         .and_then(|data| data.get("release"))
         .map(std::string::String::as_bytes);
-    let decoded = release_data.and_then(decode_helm_release);
+    let decoded = release_data.map(decode_helm_release).transpose();
+    let (decoded, decode_error) = match decoded {
+        Ok(decoded) => (decoded, None),
+        Err(error) => (None, Some(error)),
+    };
     let release = decoded.as_ref().and_then(safe_release_metadata);
     let values_summary =
         values_summary(decoded.as_ref().and_then(|release| release.config.as_ref()));
@@ -407,6 +469,7 @@ fn configmap_record(
         decoded.as_ref(),
     )?;
     Ok(HelmStorageRecord {
+        decode_error,
         summary,
         release,
         values_summary,
@@ -426,7 +489,12 @@ fn release_summary(
     let namespace = decoded
         .and_then(|release| release.namespace.clone())
         .or_else(|| metadata.namespace.clone())
-        .ok_or_else(|| AppError::new("Helm release storage object has no namespace", "cluster"))?;
+        .ok_or_else(|| {
+            AppError::new(
+                "Helm release storage object has no namespace",
+                AppErrorKind::Cluster,
+            )
+        })?;
     let name = decoded
         .and_then(|release| release.name.clone())
         .or_else(|| label_value(labels, "name"))
@@ -487,13 +555,59 @@ fn latest_releases(records: Vec<HelmStorageRecord>) -> Vec<HelmReleaseSummary> {
     latest.into_values().collect()
 }
 
-fn decode_helm_release(data: &[u8]) -> Option<DecodedHelmRelease> {
-    let encoded = std::str::from_utf8(data).ok()?.trim();
-    let gzipped = STANDARD.decode(encoded).ok()?;
-    let mut decoder = GzDecoder::new(gzipped.as_slice());
-    let mut json = String::new();
-    decoder.read_to_string(&mut json).ok()?;
-    serde_json::from_str(&json).ok()
+fn decode_helm_release(data: &[u8]) -> Result<DecodedHelmRelease, AppError> {
+    if data.len() > MAX_STORED_RELEASE_BYTES {
+        return Err(AppError::new(
+            "Helm release storage exceeds the Kubernetes 1 MiB limit",
+            AppErrorKind::Validation,
+        ));
+    }
+    let encoded = std::str::from_utf8(data)
+        .map_err(|error| {
+            AppError::new(
+                "Helm release encoding is not UTF-8",
+                AppErrorKind::Serialization,
+            )
+            .with_source(error)
+        })?
+        .trim();
+    let decoded = STANDARD.decode(encoded).map_err(|error| {
+        AppError::new(
+            "Helm release encoding is not base64",
+            AppErrorKind::Serialization,
+        )
+        .with_source(error)
+    })?;
+    let json = if decoded.starts_with(&[0x1f, 0x8b, 0x08]) {
+        let mut json = Vec::new();
+        GzDecoder::new(decoded.as_slice())
+            .take(MAX_DECODED_RELEASE_BYTES + 1)
+            .read_to_end(&mut json)
+            .map_err(|error| {
+                AppError::new(
+                    "Could not decompress Helm release",
+                    AppErrorKind::Serialization,
+                )
+                .with_source(error)
+            })?;
+        if json.len() as u64 > MAX_DECODED_RELEASE_BYTES {
+            return Err(AppError::new(
+                "Decoded Helm release exceeds the 32 MiB limit",
+                AppErrorKind::Validation,
+            ));
+        }
+        json
+    } else {
+        // Helm also accepts its older, uncompressed JSON storage format.
+        decoded
+    };
+    serde_json::from_slice(&json).map_err(|error| {
+        AppError::new(
+            "Helm release contains invalid JSON",
+            AppErrorKind::Serialization,
+        )
+        .with_source(error)
+    })
 }
 
 fn safe_release_metadata(release: &DecodedHelmRelease) -> Option<serde_json::Value> {

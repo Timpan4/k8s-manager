@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ArgoApplicationRef, ArgoOperationRequest};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,28 +26,30 @@ pub(crate) struct OperationSession {
 }
 
 pub(crate) trait SecureStore: Send + Sync {
-    fn read(&self, id: &str) -> Result<Option<String>, ()>;
-    fn write(&self, id: &str, value: &str) -> Result<(), ()>;
-    fn delete(&self, id: &str) -> Result<(), ()>;
+    fn read(&self, id: &str) -> Result<Option<String>, AppError>;
+    fn write(&self, id: &str, value: &str) -> Result<(), AppError>;
+    fn delete(&self, id: &str) -> Result<(), AppError>;
 }
 
 struct KeyringStore;
 impl SecureStore for KeyringStore {
-    fn read(&self, id: &str) -> Result<Option<String>, ()> {
-        let entry = key(id).map_err(|_| ())?;
+    fn read(&self, id: &str) -> Result<Option<String>, AppError> {
+        let entry = key(id)?;
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(()),
+            Err(error) => Err(unavailable().with_source(error)),
         }
     }
-    fn write(&self, id: &str, value: &str) -> Result<(), ()> {
-        key(id).map_err(|_| ())?.set_password(value).map_err(|_| ())
+    fn write(&self, id: &str, value: &str) -> Result<(), AppError> {
+        key(id)?
+            .set_password(value)
+            .map_err(|error| unavailable().with_source(error))
     }
-    fn delete(&self, id: &str) -> Result<(), ()> {
-        match key(id).map_err(|_| ())?.delete_credential() {
+    fn delete(&self, id: &str) -> Result<(), AppError> {
+        match key(id)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(()),
+            Err(error) => Err(unavailable().with_source(error)),
         }
     }
 }
@@ -81,25 +84,26 @@ fn now() -> u64 {
 }
 
 fn key(id: &str) -> Result<keyring::Entry, AppError> {
-    keyring::Entry::new(SERVICE, id).map_err(|_| {
+    keyring::Entry::new(SERVICE, id).map_err(|error| {
         AppError::new(
             "native credential storage unavailable",
-            "credentialUnavailable",
+            AppErrorKind::CredentialUnavailable,
         )
+        .with_source(error)
     })
 }
 
 fn state_error() -> AppError {
     AppError::new(
         "Argo CD operation state unavailable",
-        "argoOperationUnavailable",
+        AppErrorKind::ArgoOperationUnavailable,
     )
 }
 
 fn unavailable() -> AppError {
     AppError::new(
         "native credential storage unavailable",
-        "credentialUnavailable",
+        AppErrorKind::CredentialUnavailable,
     )
 }
 
@@ -133,11 +137,9 @@ pub(crate) fn issue(
         expires_at: issued_at + SESSION_TTL.as_secs(),
     };
     let id = Uuid::new_v4().to_string();
-    let serialized = serde_json::to_string(&session).map_err(|_| state_error())?;
-    store
-        .secure
-        .write(&id, &serialized)
-        .map_err(|()| unavailable())?;
+    let serialized =
+        serde_json::to_string(&session).map_err(|error| state_error().with_source(error))?;
+    store.secure.write(&id, &serialized)?;
     store
         .records
         .lock()
@@ -161,25 +163,22 @@ fn load(store: &SessionStore, id: &str) -> Result<(OperationSession, String), Ap
         .cloned()
         .map(|session| serde_json::to_string(&session).map(|value| (session, value)))
         .transpose()
-        .map_err(|_| state_error())?;
+        .map_err(|error| state_error().with_source(error))?;
     if let Some(value) = value {
         return Ok(value);
     }
-    let serialized = store
-        .secure
-        .read(id)
-        .map_err(|()| unavailable())?
-        .ok_or_else(|| {
-            AppError::new(
-                "operation session expired or already used",
-                "argoOperationUnavailable",
-            )
-        })?;
-    let session = serde_json::from_str(&serialized).map_err(|_| {
+    let serialized = store.secure.read(id)?.ok_or_else(|| {
         AppError::new(
             "operation session expired or already used",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         )
+    })?;
+    let session = serde_json::from_str(&serialized).map_err(|error| {
+        AppError::new(
+            "operation session expired or already used",
+            AppErrorKind::ArgoOperationUnavailable,
+        )
+        .with_source(error)
     })?;
     Ok((session, serialized))
 }
@@ -197,14 +196,14 @@ pub(crate) fn peek(
     {
         return Err(AppError::new(
             "operation session expired or already used",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let (session, fingerprint) = load(store, id)?;
     if session.expires_at <= now_override.unwrap_or_else(now) {
         return Err(AppError::new(
             "operation session expired",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     Ok(SessionSnapshot {
@@ -223,61 +222,59 @@ pub(crate) fn consume(
     if consumed.contains(id) {
         return Err(AppError::new(
             "operation session expired or already used",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let (record, fingerprint) = if let Some(record) = records.get(id).cloned() {
-        let fingerprint = serde_json::to_string(&record).map_err(|_| state_error())?;
+        let fingerprint =
+            serde_json::to_string(&record).map_err(|error| state_error().with_source(error))?;
         if store
             .secure
-            .read(id)
-            .map_err(|()| unavailable())?
+            .read(id)?
             .is_some_and(|value| value != fingerprint)
         {
             return Err(AppError::new(
                 "operation session changed since review",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             ));
         }
         (record, fingerprint)
     } else {
-        let serialized = store
-            .secure
-            .read(id)
-            .map_err(|()| unavailable())?
-            .ok_or_else(|| {
-                AppError::new(
-                    "operation session expired or already used",
-                    "argoOperationUnavailable",
-                )
-            })?;
-        let record = serde_json::from_str(&serialized).map_err(|_| {
+        let serialized = store.secure.read(id)?.ok_or_else(|| {
             AppError::new(
                 "operation session expired or already used",
-                "argoOperationUnavailable",
+                AppErrorKind::ArgoOperationUnavailable,
             )
+        })?;
+        let record = serde_json::from_str(&serialized).map_err(|error| {
+            AppError::new(
+                "operation session expired or already used",
+                AppErrorKind::ArgoOperationUnavailable,
+            )
+            .with_source(error)
         })?;
         (record, serialized)
     };
     if fingerprint != expected.fingerprint {
         return Err(AppError::new(
             "operation session changed since review",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     let consumed_at = now();
     if record.expires_at <= consumed_at {
         return Err(AppError::new(
             "operation session expired",
-            "argoOperationUnavailable",
+            AppErrorKind::ArgoOperationUnavailable,
         ));
     }
     records.remove(id);
     consumed.insert(id.to_owned());
-    let tombstone = serde_json::to_string(&Consumed { consumed_at }).map_err(|_| state_error())?;
-    if store.secure.write(id, &tombstone).is_err() {
+    let tombstone = serde_json::to_string(&Consumed { consumed_at })
+        .map_err(|error| state_error().with_source(error))?;
+    if let Err(error) = store.secure.write(id, &tombstone) {
         let _ = store.secure.delete(id);
-        return Err(unavailable());
+        return Err(error);
     }
     Ok(record)
 }
@@ -294,19 +291,19 @@ mod tests {
         fail_delete: Mutex<bool>,
     }
     impl SecureStore for Memory {
-        fn read(&self, id: &str) -> Result<Option<String>, ()> {
+        fn read(&self, id: &str) -> Result<Option<String>, AppError> {
             Ok(self.values.lock().unwrap().get(id).cloned())
         }
-        fn write(&self, id: &str, value: &str) -> Result<(), ()> {
+        fn write(&self, id: &str, value: &str) -> Result<(), AppError> {
             if *self.fail_write.lock().unwrap() {
-                return Err(());
+                return Err(unavailable());
             }
             self.values.lock().unwrap().insert(id.into(), value.into());
             Ok(())
         }
-        fn delete(&self, _id: &str) -> Result<(), ()> {
+        fn delete(&self, _id: &str) -> Result<(), AppError> {
             if *self.fail_delete.lock().unwrap() {
-                Err(())
+                Err(unavailable())
             } else {
                 Ok(())
             }
@@ -419,7 +416,7 @@ mod tests {
             .expires_at += 1;
         assert_eq!(
             consume(&store, &id, &reviewed).unwrap_err().kind,
-            "argoOperationUnavailable"
+            AppErrorKind::ArgoOperationUnavailable
         );
     }
 

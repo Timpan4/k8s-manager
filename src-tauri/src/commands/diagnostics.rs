@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{
     AppError, BackendDiagnosticEvent, BackendDiagnosticField, BackendDiagnosticStatus,
 };
@@ -104,8 +105,10 @@ pub fn record_backend_result<T>(
 ) {
     match result {
         Ok(value) => record_backend_success(command, started, success_summary(value)),
-        Err(error) if error.kind == "cancelled" => record_backend_cancelled(command, started),
-        Err(error) => record_backend_error(command, started, &error.kind),
+        Err(error) if error.kind == AppErrorKind::Cancelled => {
+            record_backend_cancelled(command, started);
+        }
+        Err(error) => record_backend_error(command, started, error.kind.as_str()),
     }
 }
 
@@ -182,7 +185,7 @@ mod tests {
         record_backend_result::<()>(
             "tracked_error",
             Instant::now(),
-            &Err(AppError::new("boom", "transport")),
+            &Err(AppError::new("boom", AppErrorKind::Transport)),
             |()| Vec::new(),
         );
         let events = get_backend_diagnostics();

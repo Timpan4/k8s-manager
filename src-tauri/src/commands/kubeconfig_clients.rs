@@ -1,4 +1,6 @@
 use super::kubeconfig::{KubeconfigSource, FINITE_REQUEST_READ_TIMEOUT};
+#[cfg(test)]
+use crate::models::AppErrorKind;
 use crate::{
     commands::helpers::{client_cache, client_cancellation::RequestCancellationLayer},
     models::AppError,
@@ -136,6 +138,6 @@ mod tests {
 
         let error = waiting.await.expect_err("resolution should be cancelled");
 
-        assert_eq!(error.kind, "cancelled");
+        assert_eq!(error.kind, AppErrorKind::Cancelled);
     }
 }

@@ -3,6 +3,7 @@ use crate::commands::helpers::{
     fetch_and_serialize, fmt_ready, k8s_creation_timestamp_to_rfc3339, resource_age,
     update_resource_health,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ResourceDetailsFull, ResourceHealth, ResourceSummary};
 use chrono::{TimeZone, Utc};
 use kube::Client;
@@ -22,7 +23,7 @@ pub(super) async fn deployment_details(
     )
     .await?;
     let metadata = serde_json::to_value(&deploy.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = deploy
         .status
         .as_ref()
@@ -84,7 +85,7 @@ pub(super) async fn statefulset_details(
     )
     .await?;
     let metadata = serde_json::to_value(&ss.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = ss
         .status
         .as_ref()
@@ -142,7 +143,7 @@ pub(super) async fn daemonset_details(
     )
     .await?;
     let metadata = serde_json::to_value(&ds.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = ds
         .status
         .as_ref()
@@ -200,7 +201,7 @@ pub(super) async fn ingress_details(
     )
     .await?;
     let metadata = serde_json::to_value(&ing.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = ing
         .status
         .as_ref()
@@ -256,7 +257,7 @@ pub(super) async fn job_details(
     )
     .await?;
     let metadata = serde_json::to_value(&job.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = job
         .status
         .as_ref()
@@ -330,7 +331,7 @@ pub(super) async fn cronjob_details(
     )
     .await?;
     let metadata = serde_json::to_value(&cj.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = cj
         .status
         .as_ref()

@@ -1,6 +1,6 @@
 use crate::models::{
-    KubernetesYamlLintDiagnostic, KubernetesYamlLintResult, KubernetesYamlLintSeverity,
-    KubernetesYamlLintStatusNote,
+    AppError, AppErrorKind, KubernetesYamlLintDiagnostic, KubernetesYamlLintResult,
+    KubernetesYamlLintSeverity, KubernetesYamlLintStatusNote,
 };
 use serde::Deserialize;
 use std::{
@@ -15,7 +15,7 @@ const KUBECONFORM_VERSION: &str = "v0.7.0";
 #[derive(Debug, Deserialize)]
 struct KubeconformOutput {
     #[serde(default)]
-    resources: Vec<KubeconformResource>,
+    resources: Option<Vec<KubeconformResource>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,11 +23,28 @@ struct KubeconformResource {
     #[serde(default)]
     kind: String,
     #[serde(default)]
-    status: String,
+    status: KubeconformStatus,
     #[serde(default)]
     msg: String,
     #[serde(default, rename = "validationErrors")]
     validation_errors: Vec<KubeconformValidationError>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+enum KubeconformStatus {
+    #[serde(rename = "statusValid", alias = "VALID")]
+    Valid,
+    #[serde(rename = "statusInvalid", alias = "INVALID")]
+    Invalid,
+    #[serde(rename = "statusError", alias = "ERROR")]
+    Error,
+    #[serde(rename = "statusSkipped", alias = "SKIPPED")]
+    Skipped,
+    #[serde(rename = "")]
+    Empty,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +75,7 @@ pub(super) async fn append_kubeconform_lint(yaml: &str, result: &mut KubernetesY
             result.notes.push(status_note(
                 KubernetesYamlLintSeverity::Warning,
                 "Kubeconform",
-                message,
+                message.message,
             ));
             return;
         }
@@ -92,20 +109,29 @@ fn collect_kubeconform_output(output: std::process::Output, result: &mut Kuberne
         return;
     };
 
-    for resource in parsed.resources {
-        let status = resource.status.to_ascii_lowercase();
-        if status.contains("valid") && !status.contains("invalid") {
+    for resource in parsed.resources.into_iter().flatten() {
+        if matches!(
+            resource.status,
+            KubeconformStatus::Valid | KubeconformStatus::Empty
+        ) {
             continue;
         }
-        let message = resource.msg.trim();
-        if message.is_empty() {
-            continue;
-        }
-        if status.contains("skip") || is_missing_schema_message(message) {
+        let message = match resource.msg.trim() {
+            "" => "Kubeconform returned no diagnostic message.",
+            message => message,
+        };
+        if !matches!(resource.status, KubeconformStatus::Invalid) {
             result.notes.push(status_note(
-                KubernetesYamlLintSeverity::Info,
+                if matches!(resource.status, KubeconformStatus::Skipped) {
+                    KubernetesYamlLintSeverity::Info
+                } else {
+                    KubernetesYamlLintSeverity::Warning
+                },
                 "Kubeconform",
-                format!("Schema validation skipped for {}: {message}", resource.kind),
+                format!(
+                    "Schema validation incomplete for {}: {message}",
+                    resource.kind
+                ),
             ));
             continue;
         }
@@ -117,11 +143,7 @@ fn collect_kubeconform_output(output: std::process::Output, result: &mut Kuberne
             .and_then(|error| concise_validation_message(field_path.as_deref(), &error.msg))
             .unwrap_or_else(|| concise_kubeconform_message(message));
         result.diagnostics.push(KubernetesYamlLintDiagnostic {
-            severity: if status.contains("error") {
-                KubernetesYamlLintSeverity::Warning
-            } else {
-                KubernetesYamlLintSeverity::Error
-            },
+            severity: KubernetesYamlLintSeverity::Error,
             source: "Kubeconform".to_string(),
             message,
             field_path,
@@ -133,35 +155,60 @@ async fn run_kubeconform(
     binary: &Path,
     cache_dir: &Path,
     yaml: &str,
-) -> Result<std::process::Output, String> {
-    let cache_arg = cache_dir.to_string_lossy().into_owned();
-    let mut child = Command::new(binary)
+) -> Result<std::process::Output, AppError> {
+    let child = Command::new(binary)
         .arg("-strict")
         .arg("-output")
         .arg("json")
         .arg("-summary")
         .arg("-cache")
-        .arg(cache_arg)
+        .arg(cache_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
-        .map_err(|error| format!("Failed to start kubeconform: {error}"))?;
+        .map_err(|error| {
+            AppError::new(
+                format!("Failed to start kubeconform: {error}"),
+                AppErrorKind::Io,
+            )
+            .with_source(error)
+        })?;
+    communicate_with_child(child, yaml).await
+}
 
+async fn communicate_with_child(
+    mut child: tokio::process::Child,
+    yaml: &str,
+) -> Result<std::process::Output, AppError> {
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "Failed to open kubeconform stdin.".to_string())?;
-    stdin
-        .write_all(yaml.as_bytes())
-        .await
-        .map_err(|error| format!("Failed to send YAML to kubeconform: {error}"))?;
-    drop(stdin);
-
-    child
-        .wait_with_output()
-        .await
-        .map_err(|error| format!("Failed to read kubeconform output: {error}"))
+        .ok_or_else(|| AppError::new("Failed to open kubeconform stdin.", AppErrorKind::Io))?;
+    let write = async move {
+        stdin.write_all(yaml.as_bytes()).await.map_err(|error| {
+            AppError::new(
+                format!("Failed to send YAML to kubeconform: {error}"),
+                AppErrorKind::Io,
+            )
+            .with_source(error)
+        })?;
+        drop(stdin);
+        Ok::<(), AppError>(())
+    };
+    let read = async move {
+        child.wait_with_output().await.map_err(|error| {
+            AppError::new(
+                format!("Failed to read kubeconform output: {error}"),
+                AppErrorKind::Io,
+            )
+            .with_source(error)
+        })
+    };
+    // Drain stdout/stderr while writing so neither side can fill the other's pipe.
+    let ((), output) = tokio::try_join!(write, read)?;
+    Ok(output)
 }
 
 fn kubeconform_cache_dir(result: &mut KubernetesYamlLintResult) -> Option<PathBuf> {
@@ -264,13 +311,6 @@ fn target_triple() -> &'static str {
     }
 }
 
-fn is_missing_schema_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("could not find schema")
-        || message.contains("failed initializing schema")
-        || message.contains("failed downloading schema")
-}
-
 fn json_pointer_to_field_path(path: &str) -> Option<String> {
     let trimmed = path.trim().trim_start_matches('/');
     if trimmed.is_empty() {
@@ -324,6 +364,60 @@ fn status_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_status_drives_validation_and_null_resources_are_empty() {
+        let mut empty = result();
+        collect_kubeconform_output(
+            std::process::Output {
+                status: exit_status(0),
+                stdout: br#"{"resources":null}"#.to_vec(),
+                stderr: Vec::new(),
+            },
+            &mut empty,
+        );
+        assert!(empty.notes.is_empty());
+        let mut invalid = result();
+        collect_kubeconform_output(std::process::Output { status: exit_status(1), stdout: br#"{"resources":[{"kind":"Widget","status":"statusInvalid","msg":"could not find schema is an invalid field value"}]}"#.to_vec(), stderr: Vec::new() }, &mut invalid);
+        assert_eq!(invalid.diagnostics.len(), 1);
+        assert!(invalid.notes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture launched by drains_output_while_writing_input"]
+    fn subprocess_pipe_fixture() {
+        use std::io::{Read, Write};
+        // Both payloads exceed OS pipe buffers and force concurrent draining.
+        std::io::stdout()
+            .write_all(&vec![b'x'; 1024 * 1024])
+            .unwrap();
+        std::io::stdout().flush().unwrap();
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        assert_eq!(input.len(), 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn drains_output_while_writing_input() {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::resources::kubeconform::tests::subprocess_pipe_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let output = communicate_with_child(child, &"y".repeat(1024 * 1024))
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 1024 * 1024);
+    }
 
     fn result() -> KubernetesYamlLintResult {
         KubernetesYamlLintResult {

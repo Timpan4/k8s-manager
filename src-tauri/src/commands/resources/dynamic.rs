@@ -9,6 +9,7 @@ use crate::commands::{
     kubeconfig::{kubeconfig_source_key, KubeconfigSource},
     record_backend_error, record_backend_success, BackendCancellationRegistry, ClusterLiveStore,
 };
+use crate::models::AppErrorKind;
 use crate::models::{
     argo_health_assessment, evaluate_health, AppError, DiscoveredResourceKind, HealthAssessment,
     HealthAssessmentEvidence, HealthAssessmentInput, HealthAssessmentSource, HealthAssessmentState,
@@ -30,16 +31,21 @@ pub(crate) fn api_resource_from_discovered(
         || resource_kind.kind.trim().is_empty()
         || resource_kind.plural.trim().is_empty()
     {
-        return Err(AppError::new("invalid discovered resource kind", "cluster"));
+        return Err(AppError::new(
+            "invalid discovered resource kind",
+            AppErrorKind::Cluster,
+        ));
     }
 
-    Ok(ApiResource {
+    let resource = ApiResource {
         group: resource_kind.group.clone(),
         version: resource_kind.version.clone(),
         api_version: resource_kind.api_version.clone(),
         kind: resource_kind.kind.clone(),
         plural: resource_kind.plural.clone(),
-    })
+    };
+    crate::commands::helpers::validate_api_resource(&resource)?;
+    Ok(resource)
 }
 
 pub(crate) fn dynamic_status_from_data(data: &Value) -> Option<String> {
@@ -161,12 +167,15 @@ fn dynamic_health_assessment(data: &Value) -> HealthAssessment {
 fn is_core_v1_secret(resource_kind: &DiscoveredResourceKind) -> bool {
     resource_kind.group.is_empty()
         && resource_kind.version == "v1"
-        && resource_kind.api_version == "v1"
-        && resource_kind.kind == "Secret"
         && resource_kind.plural == "secrets"
 }
 
 fn redact_dynamic_secret_fields(value: &mut Value) {
+    if let Some(annotation) =
+        value.pointer_mut("/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration")
+    {
+        *annotation = Value::String("REDACTED".into());
+    }
     let Value::Object(root) = value else {
         return;
     };
@@ -186,8 +195,8 @@ fn serialize_dynamic_resource_document(
     mode: YamlViewMode,
     encoding: YamlEncoding,
 ) -> Result<String, AppError> {
-    let mut value =
-        serde_json::to_value(object).map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+    let mut value = serde_json::to_value(object)
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     normalize_k8s_yaml_value(&mut value, mode);
     if is_core_v1_secret(resource_kind) {
         redact_dynamic_secret_fields(&mut value);
@@ -209,6 +218,7 @@ pub async fn dynamic_resources_summary_from(
     namespace: Option<String>,
     kubeconfig_env_var: Option<String>,
 ) -> Result<Vec<ResourceSummary>, AppError> {
+    crate::commands::helpers::validate_namespace(namespace.as_deref())?;
     let client = client_for_context(&cluster_context, kubeconfig_env_var).await?;
     let api_resource = api_resource_from_discovered(&resource_kind)?;
     let api: Api<DynamicObject> = if resource_kind.namespaced {
@@ -295,7 +305,7 @@ pub async fn list_dynamic_resources(
                 err.message,
                 started.elapsed().as_millis()
             );
-            record_backend_error("list_dynamic_resources", started, &err.kind);
+            record_backend_error("list_dynamic_resources", started, err.kind.as_str());
         }
     }
     result
@@ -310,10 +320,12 @@ pub async fn dynamic_resource_details_from(
     yaml_view_mode: Option<YamlViewMode>,
     yaml_encoding: Option<YamlEncoding>,
 ) -> Result<ResourceDetailsFull, AppError> {
+    crate::commands::helpers::validate_path_segment(&name, "resource name")?;
+    crate::commands::helpers::validate_namespace(namespace.as_deref())?;
     if resource_kind.namespaced && namespace.is_none() {
         return Err(AppError::new(
             format!("namespace required for {}", resource_kind.kind),
-            "cluster",
+            AppErrorKind::Cluster,
         ));
     }
 
@@ -331,7 +343,10 @@ pub async fn dynamic_resource_details_from(
         Api::all_with(client, &api_resource)
     };
 
-    let object = api.get(&name).await.map_err(AppError::from)?;
+    let mut object = api.get(&name).await.map_err(AppError::from)?;
+    if is_core_v1_secret(&resource_kind) {
+        crate::commands::helpers::redact_secret_metadata(&mut object.metadata);
+    }
     let yaml = serialize_dynamic_resource_document(
         &resource_kind,
         &object,
@@ -339,7 +354,7 @@ pub async fn dynamic_resource_details_from(
         yaml_encoding.unwrap_or_default(),
     )?;
     let metadata = serde_json::to_value(&object.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = dynamic_status_value(&object.data);
     let summary = dynamic_resource_summary(&cluster_context, &resource_kind, &object);
 
@@ -398,7 +413,7 @@ pub async fn get_dynamic_resource_details(
                 started.elapsed().as_millis()
             );
         }
-        Err(err) if err.kind == "cancelled" => {
+        Err(err) if err.kind == AppErrorKind::Cancelled => {
             eprintln!(
                 "[kubecove:backend] get_dynamic_resource_details cancelled context={} kind={} namespace={} name={} ms={}",
                 cluster_context,
@@ -441,6 +456,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn discovered_kind_cannot_redirect_the_resource_path() {
+        for plural in ["secrets/token?ignored=", "../secrets", "%2e%2e", "pods/log"] {
+            let mut kind = widget_kind();
+            kind.plural = plural.into();
+            assert!(api_resource_from_discovered(&kind).is_err());
+        }
+    }
+
     fn widget_kind() -> DiscoveredResourceKind {
         DiscoveredResourceKind {
             group: "example.com".to_string(),
@@ -471,7 +495,7 @@ mod tests {
         kind.plural = String::new();
 
         let err = api_resource_from_discovered(&kind).unwrap_err();
-        assert_eq!(err.kind, "cluster");
+        assert_eq!(err.kind, AppErrorKind::Cluster);
         assert_eq!(err.message, "invalid discovered resource kind");
     }
 
@@ -529,6 +553,8 @@ mod tests {
     fn assesses_argocd_application_with_same_argo_contract() {
         let mut resource_kind = widget_kind();
         resource_kind.group = "argoproj.io".to_string();
+        resource_kind.api_version = "argoproj.io/v1".to_string();
+        resource_kind.plural = "applications".to_string();
         resource_kind.kind = "Application".to_string();
         let api_resource = api_resource_from_discovered(&resource_kind).unwrap();
         let object = DynamicObject::new("payments", &api_resource).data(json!({
@@ -587,5 +613,25 @@ mod tests {
         assert!(yaml.contains("REDACTED"));
         assert!(!yaml.contains("c3VwZXItc2VjcmV0LXBhc3N3b3Jk"));
         assert!(!yaml.contains("plain-secret"));
+    }
+
+    #[test]
+    fn audit_secret_endpoint_is_redacted_despite_forged_kind() {
+        let mut resource_kind = secret_kind();
+        resource_kind.kind = "Widget".into();
+        resource_kind.api_version = "example.com/v1".into();
+        let object = DynamicObject::new(
+            "token",
+            &ApiResource::erase::<k8s_openapi::api::core::v1::Secret>(&()),
+        )
+        .data(json!({"data":{"password":"sensitive"}}));
+        let yaml = serialize_dynamic_resource_document(
+            &resource_kind,
+            &object,
+            YamlViewMode::Kubectl,
+            YamlEncoding::Yaml,
+        )
+        .unwrap();
+        assert!(!yaml.contains("sensitive"));
     }
 }

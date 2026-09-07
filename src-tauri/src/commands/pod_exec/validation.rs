@@ -1,4 +1,5 @@
 use crate::commands::kubeconfig::KubeconfigSource;
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PodExecSessionRequest, PodExecTerminalSize};
 use kube::Client;
 
@@ -30,7 +31,7 @@ pub(super) fn validate_terminal_size(size: &PodExecTerminalSize) -> Result<(), A
     {
         return Err(AppError::new(
             "terminal size must be between 1 and 500 columns and rows",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     Ok(())
@@ -57,30 +58,36 @@ pub(super) fn validate_request(
     let namespace = trimmed(&request.namespace);
     let pod_name = trimmed(&request.pod_name);
     if cluster_context.is_empty() || namespace.is_empty() || pod_name.is_empty() {
-        return Err(AppError::new("pod exec target is required", "validation"));
+        return Err(AppError::new(
+            "pod exec target is required",
+            AppErrorKind::Validation,
+        ));
     }
 
-    let command = request
-        .command
-        .iter()
-        .map(|part| trimmed(part))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if command.is_empty() {
-        return Err(AppError::new("pod exec command is required", "validation"));
+    crate::commands::helpers::validate_namespace(Some(&namespace))?;
+    crate::commands::helpers::validate_path_segment(&pod_name, "Pod name")?;
+    let command = &request.command;
+    if command
+        .first()
+        .is_none_or(|executable| executable.trim().is_empty())
+    {
+        return Err(AppError::new(
+            "pod exec command is required",
+            AppErrorKind::Validation,
+        ));
     }
 
     validate_terminal_size(&request.terminal_size)?;
     if !request.stdin && request.tty {
         return Err(AppError::new(
             "tty exec sessions require stdin",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     if !request.confirmation.acknowledged {
         return Err(AppError::new(
             "pod exec requires explicit confirmation",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     let container = request
@@ -98,13 +105,13 @@ pub(super) fn validate_request(
     {
         return Err(AppError::new(
             "pod exec confirmation target does not match the request",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
-    if request.confirmation.command != exec_command_text(&command) {
+    if request.confirmation.command != exec_command_text(command) {
         return Err(AppError::new(
             "pod exec confirmation command does not match the request",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -117,7 +124,7 @@ pub(super) fn validate_request(
         namespace,
         pod_name,
         container,
-        command,
+        command: command.clone(),
         stdin: request.stdin,
         tty: request.tty,
         terminal_size: request.terminal_size.clone(),

@@ -10,6 +10,7 @@ use super::usage_webview::{is_webview_descendant_process, webview_process_role};
 use super::usage_webview::{
     is_windows_app_webview_browser_process, windows_webview_host_exe_names,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, AppUsageMetrics, AppUsageMetricsBreakdown};
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
@@ -25,12 +26,14 @@ pub struct AppUsageMonitor {
 
 impl AppUsageMonitor {
     pub fn sample(&self) -> Result<AppUsageMetrics, AppError> {
-        let current_pid =
-            get_current_pid().map_err(|message| AppError::new(message, "usage_metrics"))?;
-        let mut system = self
-            .system
-            .lock()
-            .map_err(|_| AppError::new("usage metrics monitor is unavailable", "usage_metrics"))?;
+        let current_pid = get_current_pid()
+            .map_err(|message| AppError::new(message, AppErrorKind::UsageMetrics))?;
+        let mut system = self.system.lock().map_err(|_| {
+            AppError::new(
+                "usage metrics monitor is unavailable",
+                AppErrorKind::UsageMetrics,
+            )
+        })?;
 
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,

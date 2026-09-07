@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PodExecSessionSummary, PodExecTerminalSize};
 use chrono::Utc;
 use std::{
@@ -8,18 +9,28 @@ use std::{
     },
 };
 use tauri::async_runtime::JoinHandle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 use super::validation::ValidatedPodExecRequest;
 
+// Preserve the existing Kubernetes stdin chunk size within the approved budget.
+pub(super) const INPUT_CHUNK_BYTES: usize = 16 * 1024;
+pub(super) const PENDING_INPUT_BYTES: usize = 256 * 1024;
+pub(super) const COMMAND_CAPACITY: usize = PENDING_INPUT_BYTES / INPUT_CHUNK_BYTES;
+
 pub(super) enum ExecCommand {
-    Stdin(Vec<u8>),
+    Stdin {
+        data: Vec<u8>,
+        acknowledged: oneshot::Sender<Result<(), AppError>>,
+        _permit: OwnedSemaphorePermit,
+    },
     Resize(PodExecTerminalSize),
 }
 
 struct PodExecSession {
     summary: PodExecSessionSummary,
-    commands: mpsc::UnboundedSender<ExecCommand>,
+    commands: mpsc::Sender<ExecCommand>,
+    input_budget: Arc<Semaphore>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -43,7 +54,7 @@ impl PodExecRegistry {
     pub(super) fn insert(
         &self,
         summary: PodExecSessionSummary,
-        commands: mpsc::UnboundedSender<ExecCommand>,
+        commands: mpsc::Sender<ExecCommand>,
     ) -> PodExecSessionSummary {
         self.state
             .lock()
@@ -54,6 +65,7 @@ impl PodExecRegistry {
                 PodExecSession {
                     summary: summary.clone(),
                     commands,
+                    input_budget: Arc::new(Semaphore::new(PENDING_INPUT_BYTES)),
                     handle: None,
                 },
             );
@@ -146,10 +158,68 @@ impl PodExecRegistry {
             .sessions
             .get(session_id)
             .map(|session| session.commands.clone())
-            .ok_or_else(|| AppError::new("exec session was not found", "session"))?;
-        commands
-            .send(command)
-            .map_err(|_| AppError::new("exec session is no longer accepting input", "session"))
+            .ok_or_else(|| AppError::new("exec session was not found", AppErrorKind::Session))?;
+        commands.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AppError::new(
+                "exec input queue is full; input was not accepted",
+                AppErrorKind::Session,
+            ),
+            mpsc::error::TrySendError::Closed(_) => AppError::new(
+                "exec session is no longer accepting input",
+                AppErrorKind::Session,
+            ),
+        })
+    }
+
+    pub(super) async fn write_stdin(&self, session_id: &str, data: String) -> Result<(), AppError> {
+        if data.len() > INPUT_CHUNK_BYTES {
+            return Err(AppError::new(
+                "exec input chunks must not exceed 16 KiB",
+                AppErrorKind::Validation,
+            ));
+        }
+        let permit = {
+            let state = self.state.lock().expect("pod exec registry lock");
+            let session = state.sessions.get(session_id).ok_or_else(|| {
+                AppError::new("exec session was not found", AppErrorKind::Session)
+            })?;
+            if !session.summary.stdin {
+                return Err(AppError::new(
+                    "exec session stdin is disabled",
+                    AppErrorKind::Session,
+                ));
+            }
+            session
+                .input_budget
+                .clone()
+                .try_acquire_many_owned(u32::try_from(data.len()).expect("input is at most 16 KiB"))
+                .map_err(|error| {
+                    AppError::new(
+                        "exec pending input exceeds 256 KiB; input was not accepted",
+                        AppErrorKind::Session,
+                    )
+                    .with_source(error)
+                })?
+        };
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (acknowledged, response) = oneshot::channel();
+        self.send_command(
+            session_id,
+            ExecCommand::Stdin {
+                data: data.into_bytes(),
+                acknowledged,
+                _permit: permit,
+            },
+        )?;
+        response.await.map_err(|error| {
+            AppError::new(
+                "exec session ended before input was written",
+                AppErrorKind::Session,
+            )
+            .with_source(error)
+        })?
     }
 
     pub(super) fn stop(&self, session_id: &str) -> bool {
@@ -205,7 +275,7 @@ impl PodExecRegistry {
 
     #[cfg(test)]
     pub(super) fn insert_summary_for_test(&self, summary: PodExecSessionSummary) {
-        let (commands, _rx) = mpsc::unbounded_channel();
+        let (commands, _rx) = mpsc::channel(COMMAND_CAPACITY);
         self.state
             .lock()
             .expect("pod exec registry lock")
@@ -215,6 +285,7 @@ impl PodExecRegistry {
                 PodExecSession {
                     summary,
                     commands,
+                    input_budget: Arc::new(Semaphore::new(PENDING_INPUT_BYTES)),
                     handle: None,
                 },
             );

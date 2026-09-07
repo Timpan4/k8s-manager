@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, YamlApplyRequest, YamlApplyTarget};
 use kube::api::ApiResource;
 use serde::Deserialize;
@@ -13,10 +14,15 @@ pub(super) struct ValidatedApply {
 }
 
 pub(super) fn validate_yaml_apply(request: YamlApplyRequest) -> Result<ValidatedApply, AppError> {
-    if request.kind == "Secret" && request.api_version.as_deref().unwrap_or("v1") == "v1" {
+    crate::commands::helpers::validate_path_segment(&request.name, "name")?;
+    crate::commands::helpers::validate_namespace(request.namespace.as_deref())?;
+    let expected_api_version = request_api_version(&request)?;
+    if expected_api_version == "v1"
+        && (request.kind == "Secret" || request.plural.as_deref() == Some("secrets"))
+    {
         return Err(AppError::new(
             "YAML apply is disabled for v1 Secrets because redacted values can corrupt data",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -26,21 +32,21 @@ pub(super) fn validate_yaml_apply(request: YamlApplyRequest) -> Result<Validated
     let metadata = manifest
         .get("metadata")
         .and_then(Value::as_object)
-        .ok_or_else(|| AppError::new("metadata is required", "validation"))?;
+        .ok_or_else(|| AppError::new("metadata is required", AppErrorKind::Validation))?;
     let name = metadata
         .get("name")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::new("metadata.name is required", "validation"))?;
+        .ok_or_else(|| AppError::new("metadata.name is required", AppErrorKind::Validation))?;
     let manifest_namespace = metadata
         .get("namespace")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
 
-    if api_version != request_api_version(&request)? {
+    if api_version != expected_api_version {
         return Err(identity_error(
             "apiVersion",
-            &request_api_version(&request)?,
+            &expected_api_version,
             api_version,
         ));
     }
@@ -52,17 +58,18 @@ pub(super) fn validate_yaml_apply(request: YamlApplyRequest) -> Result<Validated
     }
 
     let (api_resource, namespaced) = api_resource_for_request(&request, api_version)?;
+    crate::commands::helpers::validate_api_resource(&api_resource)?;
     if namespaced {
         let expected_namespace = request.namespace.as_deref().ok_or_else(|| {
             AppError::new(
                 "metadata.namespace is required for namespaced resources",
-                "validation",
+                AppErrorKind::Validation,
             )
         })?;
         let Some(actual_namespace) = manifest_namespace else {
             return Err(AppError::new(
                 "metadata.namespace is required for namespaced resources",
-                "validation",
+                AppErrorKind::Validation,
             ));
         };
         if actual_namespace != expected_namespace {
@@ -78,7 +85,7 @@ pub(super) fn validate_yaml_apply(request: YamlApplyRequest) -> Result<Validated
                 "cluster-scoped {} must not include metadata.namespace ({actual_namespace})",
                 request.kind
             ),
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
 
@@ -100,24 +107,28 @@ pub(super) fn validate_yaml_apply(request: YamlApplyRequest) -> Result<Validated
 }
 
 pub(super) fn parse_single_document(yaml: &str) -> Result<Value, AppError> {
-    let mut documents = Vec::new();
+    let mut manifest = None;
     for document in serde_yaml::Deserializer::from_str(yaml) {
         let yaml_value = serde_yaml::Value::deserialize(document)
-            .map_err(|e| AppError::new(e.to_string(), "validation"))?;
+            .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Validation).with_source(e))?;
         if matches!(yaml_value, serde_yaml::Value::Null) {
             continue;
         }
-        documents.push(yaml_value);
+        if manifest.replace(yaml_value).is_some() {
+            return Err(AppError::new(
+                "YAML apply accepts exactly one document",
+                AppErrorKind::Validation,
+            ));
+        }
     }
 
-    match documents.len() {
-        0 => Err(AppError::new("YAML document is empty", "validation")),
-        1 => serde_json::to_value(documents.remove(0))
-            .map_err(|e| AppError::new(e.to_string(), "validation")),
-        _ => Err(AppError::new(
-            "YAML apply accepts exactly one document",
-            "validation",
+    match manifest {
+        None => Err(AppError::new(
+            "YAML document is empty",
+            AppErrorKind::Validation,
         )),
+        Some(manifest) => serde_json::to_value(manifest)
+            .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Validation).with_source(e)),
     }
 }
 
@@ -126,7 +137,7 @@ fn string_field<'a>(manifest: &'a Value, key: &str) -> Result<&'a str, AppError>
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::new(format!("{key} is required"), "validation"))
+        .ok_or_else(|| AppError::new(format!("{key} is required"), AppErrorKind::Validation))
 }
 
 pub(super) fn request_api_version(request: &YamlApplyRequest) -> Result<String, AppError> {
@@ -148,14 +159,14 @@ pub(super) fn request_api_version(request: &YamlApplyRequest) -> Result<String, 
                 .version
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| AppError::new("version is required", "validation"))?
+                .ok_or_else(|| AppError::new("version is required", AppErrorKind::Validation))?
         )),
         None => request
             .version
             .clone()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| builtin_api_version_for_kind(&request.kind).map(str::to_string))
-            .ok_or_else(|| AppError::new("apiVersion is required", "validation")),
+            .ok_or_else(|| AppError::new("apiVersion is required", AppErrorKind::Validation)),
     }
 }
 
@@ -187,7 +198,7 @@ fn api_resource_for_request(
     {
         let namespaced = request
             .namespaced
-            .ok_or_else(|| AppError::new("namespaced is required", "validation"))?;
+            .ok_or_else(|| AppError::new("namespaced is required", AppErrorKind::Validation))?;
         let (group, version) = split_api_version(api_version);
         return Ok((
             ApiResource {
@@ -223,7 +234,7 @@ fn builtin_api_resource(kind: &str, api_version: &str) -> Result<(ApiResource, b
         _ => {
             return Err(AppError::new(
                 format!("unsupported apply target: {api_version} {kind}"),
-                "validation",
+                AppErrorKind::Validation,
             ));
         }
     };
@@ -250,7 +261,7 @@ fn split_api_version(api_version: &str) -> (String, String) {
 fn identity_error(field: &str, expected: &str, actual: &str) -> AppError {
     AppError::new(
         format!("{field} must match selected resource: expected {expected}, got {actual}"),
-        "validation",
+        AppErrorKind::Validation,
     )
 }
 
@@ -283,7 +294,7 @@ mod tests {
         ))
         .unwrap_err();
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
         assert!(err.message.contains("exactly one document"));
     }
 
@@ -294,7 +305,7 @@ mod tests {
         ))
         .unwrap_err();
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
         assert!(err.message.contains("metadata.name"));
     }
 
@@ -305,7 +316,7 @@ mod tests {
         ))
         .unwrap_err();
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
         assert!(err.message.contains("metadata.namespace"));
     }
 
@@ -319,8 +330,19 @@ mod tests {
 
         let err = validate_yaml_apply(request).unwrap_err();
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
         assert!(err.message.contains("Secrets"));
+    }
+
+    #[test]
+    fn audit_secret_apply_rejects_inferred_api_version() {
+        let mut request = base_request(
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: default\n",
+        );
+        request.kind = "Secret".into();
+        request.api_version = Some(" ".into());
+        request.version = Some("v1".into());
+        assert!(validate_yaml_apply(request).is_err());
     }
 
     #[test]
@@ -333,6 +355,15 @@ mod tests {
         assert_eq!(validated.target.kind, "Service");
         assert!(validated.namespaced);
         assert_eq!(validated.api_resource.plural, "services");
+    }
+
+    #[test]
+    fn apply_target_cannot_redirect_the_resource_path() {
+        let mut request = base_request(
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: api\n  namespace: default\n",
+        );
+        request.plural = Some("secrets/token?ignored=".into());
+        assert!(validate_yaml_apply(request).is_err());
     }
 
     #[test]

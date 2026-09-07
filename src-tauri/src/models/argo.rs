@@ -1,5 +1,6 @@
 use super::error::AppError;
 use super::HealthAssessment;
+use crate::models::AppErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,21 +142,27 @@ pub(crate) fn normalize_service_tunnel_endpoint(
     if service_port == 0 {
         return Err(AppError::new(
             "invalid Argo CD Service port",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     let scheme = scheme.trim().to_ascii_lowercase();
     if !matches!(scheme.as_str(), "http" | "https") {
         return Err(AppError::new(
             "Argo CD Service tunnel must use HTTP or HTTPS",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     let root_path = normalized_root_path(root_path.as_deref())?;
     let tls_server_name =
         normalized_tls_server_name(tls_server_name.as_deref(), &service_name, &namespace)?;
     let url = reqwest::Url::parse(&format!("{scheme}://{tls_server_name}{root_path}"))
-        .map_err(|_| AppError::new("invalid Argo CD Service endpoint", "argoConnection"))?
+        .map_err(|error| {
+            AppError::new(
+                "invalid Argo CD Service endpoint",
+                AppErrorKind::ArgoConnection,
+            )
+            .with_source(error)
+        })?
         .to_string()
         .trim_end_matches('/')
         .to_string();
@@ -181,9 +188,12 @@ fn required_dns_label(value: &str, field: &str) -> Result<String, AppError> {
             b'-' => index != 0 && index + 1 != value.len(),
             _ => false,
         });
-    valid
-        .then_some(value)
-        .ok_or_else(|| AppError::new(format!("invalid Argo CD Service {field}"), "argoConnection"))
+    valid.then_some(value).ok_or_else(|| {
+        AppError::new(
+            format!("invalid Argo CD Service {field}"),
+            AppErrorKind::ArgoConnection,
+        )
+    })
 }
 
 fn normalized_root_path(value: Option<&str>) -> Result<String, AppError> {
@@ -194,15 +204,16 @@ fn normalized_root_path(value: Option<&str>) -> Result<String, AppError> {
     if !value.starts_with('/') {
         return Err(AppError::new(
             "Argo CD root path must start with '/'",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
-    let url = reqwest::Url::parse(&format!("https://argo.invalid{value}"))
-        .map_err(|_| AppError::new("invalid Argo CD root path", "argoConnection"))?;
+    let url = reqwest::Url::parse(&format!("https://argo.invalid{value}")).map_err(|error| {
+        AppError::new("invalid Argo CD root path", AppErrorKind::ArgoConnection).with_source(error)
+    })?;
     if url.query().is_some() || url.fragment().is_some() {
         return Err(AppError::new(
             "Argo CD root path must not contain a query or fragment",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     Ok(match url.path().trim_end_matches('/') {
@@ -220,8 +231,13 @@ fn normalized_tls_server_name(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map_or_else(|| format!("{service_name}.{namespace}.svc"), str::to_string);
-    let url = reqwest::Url::parse(&format!("https://{value}"))
-        .map_err(|_| AppError::new("invalid Argo CD TLS server name", "argoConnection"))?;
+    let url = reqwest::Url::parse(&format!("https://{value}")).map_err(|error| {
+        AppError::new(
+            "invalid Argo CD TLS server name",
+            AppErrorKind::ArgoConnection,
+        )
+        .with_source(error)
+    })?;
     if url.host_str().is_none()
         || url.port().is_some()
         || !url.username().is_empty()
@@ -230,7 +246,7 @@ fn normalized_tls_server_name(
     {
         return Err(AppError::new(
             "invalid Argo CD TLS server name",
-            "argoConnection",
+            AppErrorKind::ArgoConnection,
         ));
     }
     Ok(url.host_str().expect("validated host").to_string())

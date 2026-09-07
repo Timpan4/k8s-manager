@@ -3,6 +3,7 @@ use crate::commands::gitops_crd::{
     resource_yaml,
 };
 use crate::commands::helpers::{k8s_creation_timestamp_to_rfc3339, resource_age};
+use crate::models::AppErrorKind;
 use crate::models::{
     argo_application_set_health_assessment, AppError, ArgoApplicationSetDetails,
     ArgoApplicationSetSummary, YamlEncoding, YamlViewMode,
@@ -119,14 +120,19 @@ pub async fn get_argocd_appset_details(
 
     let ar = match find_api_resource(&client, "argoproj.io", "ApplicationSet").await? {
         Some(ar) => ar,
-        None => return Err(AppError::new("ApplicationSet CRD not found", "cluster")),
+        None => {
+            return Err(AppError::new(
+                "ApplicationSet CRD not found",
+                AppErrorKind::Cluster,
+            ))
+        }
     };
 
     let obj = get_crd_object(client.clone(), &ar, &name, namespace.as_deref()).await?;
     let yaml = resource_yaml(&obj, yaml_view_mode, yaml_encoding)?;
     let metadata = resource_metadata(&obj)?;
     let summary = application_set_summary_from_object(&cluster_context, &obj)
-        .ok_or_else(|| AppError::new("invalid ApplicationSet data", "cluster"))?;
+        .ok_or_else(|| AppError::new("invalid ApplicationSet data", AppErrorKind::Cluster))?;
     Ok(ArgoApplicationSetDetails {
         summary,
         yaml,

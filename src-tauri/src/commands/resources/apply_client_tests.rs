@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::AppErrorKind;
 use http::{header::CONTENT_TYPE, Method, Request, Response};
 use kube::{client::Body, Client};
 use serde_json::json;
@@ -190,7 +191,7 @@ async fn apply_classifies_field_manager_conflict() {
     let (result, ()) = await_mock(async { tokio::join!(operation, responder) }).await;
     let err = result.unwrap_err();
 
-    assert_eq!(err.kind, "fieldManagerConflict");
+    assert_eq!(err.kind, AppErrorKind::FieldManagerConflict);
     assert_eq!(err.message, "Apply failed with conflicts");
 }
 
@@ -221,6 +222,6 @@ async fn apply_maps_forbidden_to_forbidden_kind() {
     let (result, ()) = await_mock(async { tokio::join!(operation, responder) }).await;
     let err = result.unwrap_err();
 
-    assert_eq!(err.kind, "forbidden");
+    assert_eq!(err.kind, AppErrorKind::Forbidden);
     assert!(err.message.contains("services \"api\" is forbidden"));
 }

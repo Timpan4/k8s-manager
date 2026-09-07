@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, WatchResourceKind};
 use kube::api::ApiResource;
 
@@ -55,7 +56,10 @@ pub(super) fn normalize_resource_kind(
     kind: &WatchResourceKind,
 ) -> Result<WatchResourceKind, AppError> {
     if kind.kind.trim().is_empty() {
-        return Err(AppError::new("resource kind is required", "validation"));
+        return Err(AppError::new(
+            "resource kind is required",
+            AppErrorKind::Validation,
+        ));
     }
 
     if let (Some(version), Some(api_version), Some(plural), Some(namespaced)) = (
@@ -81,7 +85,7 @@ pub(super) fn normalize_resource_kind(
     known_resource_kind(&kind.kind).ok_or_else(|| {
         AppError::new(
             format!("watch metadata missing for {}", kind.kind),
-            "validation",
+            AppErrorKind::Validation,
         )
     })
 }
@@ -95,19 +99,21 @@ fn group_from_api_version(api_version: &str) -> String {
 
 pub(super) fn api_resource_from_kind(kind: &WatchResourceKind) -> Result<ApiResource, AppError> {
     let resource_kind = normalize_resource_kind(kind)?;
-    Ok(ApiResource {
+    let resource = ApiResource {
         group: resource_kind.group.unwrap_or_default(),
-        version: resource_kind
-            .version
-            .ok_or_else(|| AppError::new("resource version is required", "validation"))?,
-        api_version: resource_kind
-            .api_version
-            .ok_or_else(|| AppError::new("resource apiVersion is required", "validation"))?,
+        version: resource_kind.version.ok_or_else(|| {
+            AppError::new("resource version is required", AppErrorKind::Validation)
+        })?,
+        api_version: resource_kind.api_version.ok_or_else(|| {
+            AppError::new("resource apiVersion is required", AppErrorKind::Validation)
+        })?,
         kind: resource_kind.kind,
-        plural: resource_kind
-            .plural
-            .ok_or_else(|| AppError::new("resource plural is required", "validation"))?,
-    })
+        plural: resource_kind.plural.ok_or_else(|| {
+            AppError::new("resource plural is required", AppErrorKind::Validation)
+        })?,
+    };
+    crate::commands::helpers::validate_api_resource(&resource)?;
+    Ok(resource)
 }
 
 #[cfg(test)]
@@ -143,7 +149,7 @@ mod tests {
         })
         .expect_err("missing dynamic metadata should fail");
 
-        assert_eq!(err.kind, "validation");
+        assert_eq!(err.kind, AppErrorKind::Validation);
     }
 
     #[test]

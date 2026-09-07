@@ -6,6 +6,7 @@ use super::{
     },
     ArgoConnectionStore,
 };
+use crate::models::AppErrorKind;
 use crate::{
     commands::BackendCancellationRegistry,
     models::{AppError, ArgoApplicationRef, ArgoManagedResource, ArgoResourceComparison},
@@ -41,7 +42,7 @@ async fn argo_resource_comparison(
                     && candidate.namespace == resource.namespace
                     && candidate.name == resource.name
             })
-            .ok_or_else(|| AppError::new("managed resource not found", "notFound"))?;
+            .ok_or_else(|| AppError::new("managed resource not found", AppErrorKind::NotFound))?;
         return Ok(ArgoResourceComparison {
             resource,
             exact: Some(false),
@@ -50,12 +51,16 @@ async fn argo_resource_comparison(
         });
     }
     if transport != "connected" {
-        return Err(AppError::new("invalid Argo CD transport", "argoConnection"));
+        return Err(AppError::new(
+            "invalid Argo CD transport",
+            AppErrorKind::ArgoConnection,
+        ));
     }
     let connection = scoped_connection(
         store,
-        &connection_id
-            .ok_or_else(|| AppError::new("Argo CD connection required", "argoConnection"))?,
+        &connection_id.ok_or_else(|| {
+            AppError::new("Argo CD connection required", AppErrorKind::ArgoConnection)
+        })?,
         &cluster_context,
         application.workspace_id.as_deref(),
         kubeconfig_env_var.as_deref(),
@@ -85,7 +90,7 @@ async fn argo_resource_comparison(
                 && text(item, "namespace") == resource.namespace
                 && text(item, "name") == resource.name
         })
-        .ok_or_else(|| AppError::new("managed resource not found", "notFound"))?;
+        .ok_or_else(|| AppError::new("managed resource not found", AppErrorKind::NotFound))?;
     let resource = managed_resource(item);
     let available_actions = match actions_path(&application, &resource) {
         Some(path) => api_get(&connection, &path)

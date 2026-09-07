@@ -1,16 +1,19 @@
 use crate::models::{
-    AppError, PodExecSessionMessage, PodExecSessionRequest, PodExecSessionSummary,
+    AppError, AppErrorKind, PodExecSessionMessage, PodExecSessionRequest, PodExecSessionSummary,
 };
 use futures_util::SinkExt;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::Status};
-use kube::api::{Api, AttachParams, TerminalSize};
+use kube::api::{Api, AttachParams, AttachedProcess, TerminalSize};
 use tauri::ipc::Channel;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, oneshot},
+    sync::mpsc,
+    task::JoinSet,
 };
 
-use super::registry::{session_summary, ExecCommand, PodExecRegistry};
+use super::registry::{
+    session_summary, ExecCommand, PodExecRegistry, COMMAND_CAPACITY, INPUT_CHUNK_BYTES,
+};
 use super::validation::{client_for_context, validate_request, ValidatedPodExecRequest};
 
 fn send(channel: &Channel<PodExecSessionMessage>, message: PodExecSessionMessage) -> bool {
@@ -55,7 +58,7 @@ async fn read_exec_output(
     stream: &'static str,
     mut reader: impl AsyncRead + Unpin,
     channel: Channel<PodExecSessionMessage>,
-) {
+) -> Result<(), AppError> {
     let mut buffer = [0_u8; 4096];
     let mut pending = Vec::new();
     loop {
@@ -85,28 +88,28 @@ async fn read_exec_output(
                             data,
                         },
                     ) {
-                        return;
+                        return Err(AppError::new(
+                            "exec output channel closed",
+                            AppErrorKind::Session,
+                        ));
                     }
                 }
             }
-            Err(err) => {
-                send(
-                    &channel,
-                    PodExecSessionMessage::Error {
-                        session_id: session_id.clone(),
-                        message: err.to_string(),
-                    },
-                );
-                break;
+            Err(error) => {
+                return Err(
+                    AppError::new("Could not read exec output", AppErrorKind::Io)
+                        .with_source(error),
+                )
             }
         }
     }
+    Ok(())
 }
 
 async fn run_exec_session(
     summary: PodExecSessionSummary,
     request: ValidatedPodExecRequest,
-    mut commands: mpsc::UnboundedReceiver<ExecCommand>,
+    commands: mpsc::Receiver<ExecCommand>,
     channel: Channel<PodExecSessionMessage>,
     registry: PodExecRegistry,
 ) {
@@ -145,7 +148,7 @@ async fn run_exec_session(
         .stdout(true)
         .stderr(!request.tty)
         .tty(request.tty)
-        .max_stdin_buf_size(16 * 1024)
+        .max_stdin_buf_size(INPUT_CHUNK_BYTES)
         .max_stdout_buf_size(64 * 1024)
         .max_stderr_buf_size(64 * 1024);
     if let Some(container) = &request.container {
@@ -181,105 +184,155 @@ async fn run_exec_session(
         },
     );
 
-    let mut stdin = attached.stdin();
-    let mut terminal_size = attached.terminal_size();
-    if let Some(sender) = terminal_size.as_mut() {
-        let _ = sender
-            .send(TerminalSize {
-                width: request.terminal_size.cols,
-                height: request.terminal_size.rows,
-            })
-            .await;
+    let result = drive_exec_io(
+        &mut attached,
+        &session_id,
+        &request,
+        commands,
+        &channel,
+        &registry,
+    )
+    .await;
+    // AttachedProcess owns and aborts its WebSocket task on drop, including errors.
+    drop(attached);
+    match result {
+        Ok(status) => {
+            let exit_code = exit_code_from_status(&status);
+            registry.mark_exited(&session_id, exit_code);
+            send(
+                &channel,
+                PodExecSessionMessage::Exited {
+                    session_id: session_id.clone(),
+                    exit_code,
+                    reason: status.reason,
+                    message: status.message,
+                },
+            );
+        }
+        Err(error) => {
+            registry.mark_error(&session_id, error.message.clone());
+            send(
+                &channel,
+                PodExecSessionMessage::Error {
+                    session_id: session_id.clone(),
+                    message: error.message,
+                },
+            );
+        }
     }
+    send(&channel, PodExecSessionMessage::Stopped { session_id });
+}
 
-    let mut readers = Vec::new();
+async fn drive_exec_io(
+    attached: &mut AttachedProcess,
+    session_id: &str,
+    request: &ValidatedPodExecRequest,
+    mut commands: mpsc::Receiver<ExecCommand>,
+    channel: &Channel<PodExecSessionMessage>,
+    registry: &PodExecRegistry,
+) -> Result<Status, AppError> {
+    let mut readers = JoinSet::new();
     if let Some(stdout) = attached.stdout() {
-        readers.push(tauri::async_runtime::spawn(read_exec_output(
-            session_id.clone(),
+        readers.spawn(read_exec_output(
+            session_id.to_string(),
             if request.tty { "terminal" } else { "stdout" },
             stdout,
             channel.clone(),
-        )));
+        ));
     }
     if let Some(stderr) = attached.stderr() {
-        readers.push(tauri::async_runtime::spawn(read_exec_output(
-            session_id.clone(),
+        readers.spawn(read_exec_output(
+            session_id.to_string(),
             "stderr",
             stderr,
             channel.clone(),
-        )));
+        ));
     }
-    let (status_tx, mut status_rx) = oneshot::channel();
-    if let Some(status) = attached.take_status() {
-        tauri::async_runtime::spawn(async move {
-            let _ = status_tx.send(status.await);
-        });
-    } else {
-        drop(status_tx);
-    }
-
-    loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    break;
-                };
+    let status = attached.take_status().ok_or_else(|| {
+        AppError::new("exec status receiver is unavailable", AppErrorKind::Session)
+    })?;
+    let mut stdin = attached.stdin();
+    let mut terminal_size = attached.terminal_size();
+    let status = {
+        let input = async {
+            if let Some(sender) = terminal_size.as_mut() {
+                sender
+                    .send(TerminalSize {
+                        width: request.terminal_size.cols,
+                        height: request.terminal_size.rows,
+                    })
+                    .await
+                    .map_err(|error| {
+                        AppError::new("Could not resize exec terminal", AppErrorKind::Session)
+                            .with_source(error)
+                    })?;
+            }
+            while let Some(command) = commands.recv().await {
                 match command {
-                    ExecCommand::Stdin(data) => {
-                        if let Some(writer) = stdin.as_mut() {
-                            if let Err(err) = writer.write_all(&data).await {
-                                registry.mark_error(&session_id, err.to_string());
-                                send(
-                                    &channel,
-                                    PodExecSessionMessage::Error {
-                                        session_id: session_id.clone(),
-                                        message: err.to_string(),
-                                    },
-                                );
-                                break;
-                            }
-                        }
+                    ExecCommand::Stdin {
+                        data,
+                        acknowledged,
+                        _permit,
+                    } => {
+                        let result = match stdin.as_mut() {
+                            Some(writer) => writer.write_all(&data).await.map_err(|error| {
+                                AppError::new("Could not write exec input", AppErrorKind::Io)
+                                    .with_source(error)
+                            }),
+                            None => Err(AppError::new(
+                                "exec session stdin is unavailable",
+                                AppErrorKind::Session,
+                            )),
+                        };
+                        let _ = acknowledged.send(result.clone());
+                        result?;
                     }
                     ExecCommand::Resize(size) => {
                         if let Some(sender) = terminal_size.as_mut() {
-                            if sender
+                            sender
                                 .send(TerminalSize {
                                     width: size.cols,
                                     height: size.rows,
                                 })
                                 .await
-                                .is_ok()
-                            {
-                                registry.mark_terminal_size(&session_id, size);
-                            }
+                                .map_err(|error| {
+                                    AppError::new(
+                                        "Could not resize exec terminal",
+                                        AppErrorKind::Session,
+                                    )
+                                    .with_source(error)
+                                })?;
+                            registry.mark_terminal_size(session_id, size);
                         }
                     }
                 }
             }
-            status = &mut status_rx => {
-                let status = status.ok().flatten();
-                let exit_code = status.as_ref().and_then(exit_code_from_status);
-                registry.mark_exited(&session_id, exit_code);
-                send(
-                    &channel,
-                    PodExecSessionMessage::Exited {
-                        session_id: session_id.clone(),
-                        exit_code,
-                        reason: status.as_ref().and_then(|status| status.reason.clone()),
-                        message: status.as_ref().and_then(|status| status.message.clone()),
-                    },
-                );
-                break;
+            Err::<(), AppError>(AppError::new(
+                "exec input channel closed before completion",
+                AppErrorKind::Session,
+            ))
+        };
+        tokio::pin!(input, status);
+        loop {
+            tokio::select! {
+                status = &mut status => break status.ok_or_else(|| AppError::new("exec session closed without an exit status", AppErrorKind::Session))?,
+                result = &mut input => { result?; unreachable!("input loop returns only on error"); },
+                result = readers.join_next(), if !readers.is_empty() => {
+                    result.expect("readers is not empty")
+                        .map_err(|error| AppError::new("exec output task failed", AppErrorKind::Internal).with_source(error))??;
+                }
             }
         }
-    }
-
+    };
     drop(stdin);
-    for reader in readers {
-        let _ = reader.await;
+    drop(terminal_size);
+    // Deliver all buffered output before Exited closes the frontend channel.
+    while let Some(result) = readers.join_next().await {
+        result.map_err(|error| {
+            AppError::new("exec output task failed", AppErrorKind::Internal).with_source(error)
+        })??;
     }
-    let _ = attached.join().await;
-    send(&channel, PodExecSessionMessage::Stopped { session_id });
+    Ok(status)
 }
 
 pub(super) async fn start_pod_exec_session_in_registry(
@@ -290,7 +343,7 @@ pub(super) async fn start_pod_exec_session_in_registry(
     let request = validate_request(&request)?;
     let session_id = registry.session_id();
     let summary = session_summary(session_id.clone(), &request);
-    let (commands, command_rx) = mpsc::unbounded_channel();
+    let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
     let summary = registry.insert(summary, commands);
     send(
         &channel,
@@ -334,10 +387,7 @@ mod tests {
     fn replaces_invalid_bytes_with_replacement_char() {
         let mut pending = vec![b'a', 0xFF, b'b'];
 
-        assert_eq!(
-            take_utf8_prefix(&mut pending).expect("chunk"),
-            "a\u{FFFD}"
-        );
+        assert_eq!(take_utf8_prefix(&mut pending).expect("chunk"), "a\u{FFFD}");
         assert_eq!(take_utf8_prefix(&mut pending).expect("rest"), "b");
         assert!(pending.is_empty());
     }

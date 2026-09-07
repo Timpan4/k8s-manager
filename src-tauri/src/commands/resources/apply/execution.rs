@@ -1,4 +1,5 @@
 use crate::commands::helpers::serialize_resource_document;
+use crate::models::AppErrorKind;
 use crate::models::{AppError, YamlApplyPreview, YamlApplyResult, YamlViewMode};
 use kube::{
     api::{Api, DynamicObject, Patch, PatchParams},
@@ -77,7 +78,10 @@ fn apply_api(
 ) -> Result<Api<DynamicObject>, AppError> {
     if validated.namespaced {
         let namespace = validated.request.namespace.as_deref().ok_or_else(|| {
-            AppError::new("namespace is required for namespaced apply", "validation")
+            AppError::new(
+                "namespace is required for namespaced apply",
+                AppErrorKind::Validation,
+            )
         })?;
         Ok(Api::namespaced_with(
             client,
@@ -92,10 +96,13 @@ fn apply_api(
 fn apply_error(error: KubeError) -> AppError {
     match &error {
         KubeError::Api(api_error) if status_has_cause(api_error, "FieldManagerConflict") => {
-            AppError::new(api_error.message.clone(), "fieldManagerConflict")
+            AppError::new(
+                api_error.message.clone(),
+                AppErrorKind::FieldManagerConflict,
+            )
         }
         KubeError::Api(api_error) if is_immutable_field_apply_error(api_error) => {
-            AppError::new(api_error.message.clone(), "immutableField")
+            AppError::new(api_error.message.clone(), AppErrorKind::ImmutableField)
         }
         _ => AppError::from(error),
     }
@@ -162,7 +169,7 @@ mod tests {
 
         let app_error = apply_error(error);
 
-        assert_eq!(app_error.kind, "fieldManagerConflict");
+        assert_eq!(app_error.kind, AppErrorKind::FieldManagerConflict);
         assert_eq!(app_error.message, "Apply failed with conflicts");
     }
 
@@ -191,7 +198,7 @@ mod tests {
 
         let app_error = apply_error(error);
 
-        assert_eq!(app_error.kind, "immutableField");
+        assert_eq!(app_error.kind, AppErrorKind::ImmutableField);
         assert_eq!(app_error.message, message);
     }
 }

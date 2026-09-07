@@ -3,6 +3,7 @@ use crate::commands::helpers::{
     fetch_and_serialize, k8s_creation_timestamp_to_rfc3339, redact_secret, resource_age,
     update_resource_health,
 };
+use crate::models::AppErrorKind;
 use crate::models::{AppError, ResourceDetailsFull, ResourceHealth, ResourceSummary};
 use chrono::{TimeZone, Utc};
 use kube::Client;
@@ -17,7 +18,7 @@ pub(super) async fn pod_details(
         fetch_and_serialize::<k8s_openapi::api::core::v1::Pod>(client, namespace.as_deref(), &name)
             .await?;
     let metadata = serde_json::to_value(&pod.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = pod
         .status
         .as_ref()
@@ -48,17 +49,10 @@ pub(super) async fn pod_details(
                 .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
                 .map(|c| c.status.clone())
         }),
-        restarts: pod.status.as_ref().and_then(|s| {
-            let r: i32 = s
-                .container_statuses
-                .as_ref()
-                .map_or(0, |cs| cs.iter().map(|c| c.restart_count).sum());
-            if r > 0 {
-                Some(r)
-            } else {
-                None
-            }
-        }),
+        restarts: pod
+            .status
+            .as_ref()
+            .and_then(|s| crate::commands::helpers::pod_restarts(s.container_statuses.as_deref())),
         owner_ref: extract_owner_ref(&pod.metadata),
         argo_app: extract_argo_app(&pod.metadata),
         helm_release: extract_helm_release(&pod.metadata),
@@ -87,7 +81,7 @@ pub(super) async fn service_details(
     )
     .await?;
     let metadata = serde_json::to_value(&svc.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = svc
         .status
         .as_ref()
@@ -141,7 +135,7 @@ pub(super) async fn configmap_details(
     )
     .await?;
     let metadata = serde_json::to_value(&cm.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let summary = ResourceSummary {
         kind: "ConfigMap".to_string(),
         cluster: cluster_context.clone(),
@@ -191,10 +185,10 @@ pub(super) async fn secret_details(
     )
     .await?;
     redact_secret(&mut sec);
-    let yaml =
-        serde_yaml::to_string(&sec).map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+    let yaml = serde_yaml::to_string(&sec)
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let metadata = serde_json::to_value(&sec.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let summary = ResourceSummary {
         kind: "Secret".to_string(),
         cluster: cluster_context.clone(),
@@ -244,7 +238,7 @@ pub(super) async fn pvc_details(
     )
     .await?;
     let metadata = serde_json::to_value(&pvc.metadata)
-        .map_err(|e| AppError::new(e.to_string(), "serialization"))?;
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
     let status = pvc
         .status
         .as_ref()

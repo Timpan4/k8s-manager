@@ -30,7 +30,7 @@ pub async fn write_pod_exec_stdin(
     data: String,
     registry: State<'_, PodExecRegistry>,
 ) -> Result<bool, AppError> {
-    registry.send_command(&session_id, ExecCommand::Stdin(data.into_bytes()))?;
+    registry.write_stdin(&session_id, data).await?;
     Ok(true)
 }
 

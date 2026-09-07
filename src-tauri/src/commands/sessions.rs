@@ -1,3 +1,4 @@
+use crate::models::AppErrorKind;
 use crate::models::{AppError, PortForwardRequest, PortForwardSessionSummary};
 use tauri::State;
 
@@ -31,7 +32,7 @@ pub async fn stop_port_forward(
     if session_id.trim().is_empty() {
         return Err(AppError::new(
             "port-forward session id is required",
-            "validation",
+            AppErrorKind::Validation,
         ));
     }
     Ok(registry.stop(session_id.trim()))
