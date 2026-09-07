@@ -511,6 +511,7 @@ fn load_persisted_sources() -> Result<PersistedKubeconfigSources, AppError> {
                 format!("failed to read kubeconfig sources: {err}"),
                 AppErrorKind::Io,
             )
+            .with_source(err)
         })?;
         serde_json::from_str(&content).map_err(|err| {
             AppError::new(
