@@ -11,6 +11,84 @@ use crate::models::{AppError, ResourceDetailsFull, YamlEncoding, YamlViewMode};
 use std::time::Instant;
 use tauri::State;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::{Request, Response};
+    use kube::{client::Body, Client};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn replicaset_details_load_from_namespaced_api() {
+        for status in [
+            Some(json!({"replicas": 3, "readyReplicas": 2, "availableReplicas": 1})),
+            None,
+        ] {
+            let object = json!({
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": {
+                    "name": "calagopus-5f554d575f",
+                    "namespace": "calagopus",
+                    "ownerReferences": [{
+                        "apiVersion": "apps/v1", "kind": "Deployment",
+                        "name": "calagopus", "uid": "deployment-uid", "controller": true
+                    }]
+                },
+                "status": status
+            });
+            let service = tower::service_fn(move |request: Request<Body>| {
+                assert_eq!(request.method(), http::Method::GET);
+                assert_eq!(
+                    request.uri().path(),
+                    "/apis/apps/v1/namespaces/calagopus/replicasets/calagopus-5f554d575f"
+                );
+                let body = object.to_string().into_bytes();
+                async move { Ok::<_, std::convert::Infallible>(Response::new(Body::from(body))) }
+            });
+            let client = Client::new(service, "default");
+            let details = resource_details_with_client(
+                client.clone(),
+                "test-cluster".into(),
+                "ReplicaSet".into(),
+                "calagopus-5f554d575f".into(),
+                Some("calagopus".into()),
+            )
+            .await
+            .expect("ReplicaSet details should load");
+            assert_eq!(details.summary.kind, "ReplicaSet");
+            assert_eq!(details.summary.cluster, "test-cluster");
+            assert_eq!(details.summary.name, "calagopus-5f554d575f");
+            assert_eq!(details.summary.namespace.as_deref(), Some("calagopus"));
+            assert_eq!(details.summary.owner_ref.as_deref(), Some("calagopus"));
+            assert_eq!(
+                details.summary.ready.as_deref(),
+                status.as_ref().map(|_| "2/3")
+            );
+            assert_eq!(
+                details.summary.status.as_deref(),
+                status.as_ref().map(|_| "Available: 1")
+            );
+            assert_eq!(details.status, status);
+            assert_eq!(details.metadata["name"], "calagopus-5f554d575f");
+            let yaml: serde_json::Value = serde_yaml::from_str(&details.yaml).unwrap();
+            assert_eq!(yaml["kind"], "ReplicaSet");
+            let document = super::super::yaml::resource_yaml_with_client(
+                client,
+                "ReplicaSet".into(),
+                "calagopus-5f554d575f".into(),
+                Some("calagopus".into()),
+                YamlViewMode::default(),
+                YamlEncoding::default(),
+            )
+            .await
+            .expect("ReplicaSet YAML should load");
+            let document: serde_json::Value = serde_yaml::from_str(&document).unwrap();
+            assert_eq!(document, yaml);
+        }
+    }
+}
+
 pub async fn resource_details_from(
     cluster_context: String,
     kind: String,
@@ -21,6 +99,16 @@ pub async fn resource_details_from(
     let source = KubeconfigSource::new(kubeconfig_env_var)?;
     let client = source.client_for_context(&cluster_context).await?;
 
+    resource_details_with_client(client, cluster_context, kind, name, namespace).await
+}
+
+async fn resource_details_with_client(
+    client: kube::Client,
+    cluster_context: String,
+    kind: String,
+    name: String,
+    namespace: Option<String>,
+) -> Result<ResourceDetailsFull, AppError> {
     match kind.as_str() {
         "Pod" => core::pod_details(client, cluster_context, name, namespace).await,
         "Service" => core::service_details(client, cluster_context, name, namespace).await,
@@ -31,6 +119,9 @@ pub async fn resource_details_from(
         }
         "Deployment" => {
             workloads::deployment_details(client, cluster_context, name, namespace).await
+        }
+        "ReplicaSet" => {
+            workloads::replicaset_details(client, cluster_context, name, namespace).await
         }
         "StatefulSet" => {
             workloads::statefulset_details(client, cluster_context, name, namespace).await
