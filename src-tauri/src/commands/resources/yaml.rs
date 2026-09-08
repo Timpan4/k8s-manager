@@ -55,6 +55,17 @@ pub async fn resource_yaml_from(
     let mode = yaml_view_mode.unwrap_or_default();
     let encoding = yaml_encoding.unwrap_or_default();
 
+    resource_yaml_with_client(client, kind, name, namespace, mode, encoding).await
+}
+
+pub(super) async fn resource_yaml_with_client(
+    client: kube::Client,
+    kind: String,
+    name: String,
+    namespace: Option<String>,
+    mode: YamlViewMode,
+    encoding: YamlEncoding,
+) -> Result<String, AppError> {
     match kind.as_str() {
         "Pod" => {
             let (_pod, yaml) =
@@ -71,6 +82,13 @@ pub async fn resource_yaml_from(
         "Deployment" => {
             let (_deploy, yaml) = fetch_and_serialize_with_encoding::<
                 k8s_openapi::api::apps::v1::Deployment,
+            >(client, namespace.as_deref(), &name, mode, encoding)
+            .await?;
+            Ok(yaml)
+        }
+        "ReplicaSet" => {
+            let (_rs, yaml) = fetch_and_serialize_with_encoding::<
+                k8s_openapi::api::apps::v1::ReplicaSet,
             >(client, namespace.as_deref(), &name, mode, encoding)
             .await?;
             Ok(yaml)
