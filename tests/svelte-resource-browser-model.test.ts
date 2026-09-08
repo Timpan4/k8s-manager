@@ -266,7 +266,7 @@ describe("svelte resource browser model", () => {
 	});
 
 	test("does not request the ownership map for restored closed state", () => {
-		const mapPanelOpen = initialOwnershipMapOpen({ mapPanelOpen: false });
+		const mapPanelOpen = initialOwnershipMapOpen({ mapPanelOpen: false }, true);
 		let loadCalls = 0;
 		if (shouldLoadOwnershipMap(mapPanelOpen, false, false)) loadCalls += 1;
 
@@ -275,9 +275,11 @@ describe("svelte resource browser model", () => {
 		expect(shouldLoadOwnershipMap(true, false, false)).toBe(true);
 	});
 
-	test("opens fresh scopes table-first but restores an opened map", () => {
-		expect(initialOwnershipMapOpen(null)).toBe(false);
-		expect(initialOwnershipMapOpen({ mapPanelOpen: true })).toBe(true);
+	test("uses the global map default for fresh scopes and preserves restored layouts", () => {
+		expect(initialOwnershipMapOpen(null, true)).toBe(true);
+		expect(initialOwnershipMapOpen(undefined, false)).toBe(false);
+		expect(initialOwnershipMapOpen({ mapPanelOpen: true }, false)).toBe(true);
+		expect(initialOwnershipMapOpen({ mapPanelOpen: false }, true)).toBe(false);
 	});
 
 	test("filters topology to table matches and ownership connectors", () => {
@@ -1049,7 +1051,8 @@ describe("svelte resource browser model", () => {
 			"utf8",
 		);
 
-		expect(source).toContain("initialOwnershipMapOpen(initialPathState)");
+		expect(source).toContain("initialOwnershipMapOpen(initialPathState, getSettingsSnapshot().showOwnershipMapByDefault)");
+		expect(source).toContain("initialOwnershipMapOpen(pathState, getSettingsSnapshot().showOwnershipMapByDefault)");
 		expect(source).toContain("settingsStore");
 		expect(source).toContain("$settingsStore.showFullTopologyOnSelection");
 		expect(source).toContain("{showFullTopologyOnSelection}");

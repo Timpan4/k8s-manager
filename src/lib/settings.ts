@@ -30,6 +30,7 @@ const DEFAULT_KUBECONFIG_SOURCE_KEY = "kubeconfigSource=default";
 export interface SettingsState {
 	showExactTimestamps: boolean;
 	showUsageFooter: boolean;
+	showOwnershipMapByDefault: boolean;
 	showFullTopologyOnSelection: boolean;
 	showUnavailableGitOpsProviders: boolean;
 	redactSecrets: boolean;
@@ -53,6 +54,7 @@ export interface SettingsState {
 	showKubeconfigSourceLabels: boolean;
 	setShowExactTimestamps: (show: boolean) => void;
 	setShowUsageFooter: (show: boolean) => void;
+	setShowOwnershipMapByDefault: (show: boolean) => void;
 	setShowFullTopologyOnSelection: (show: boolean) => void;
 	setShowUnavailableGitOpsProviders: (show: boolean) => void;
 	setRedactSecrets: (redact: boolean) => void;
@@ -119,6 +121,8 @@ export function mergePersistedSettings<Persisted>(
 		...current,
 		showExactTimestamps: booleanValue(saved.showExactTimestamps, current.showExactTimestamps),
 		showUsageFooter: booleanValue(saved.showUsageFooter, current.showUsageFooter),
+		showOwnershipMapByDefault:
+			booleanValue(saved.showOwnershipMapByDefault, current.showOwnershipMapByDefault),
 		showFullTopologyOnSelection:
 			booleanValue(saved.showFullTopologyOnSelection, current.showFullTopologyOnSelection),
 		showUnavailableGitOpsProviders:
@@ -256,6 +260,7 @@ export function partializeSettings(state: SettingsState): Partial<SettingsState>
 	return {
 		showExactTimestamps: state.showExactTimestamps,
 		showUsageFooter: state.showUsageFooter,
+		showOwnershipMapByDefault: state.showOwnershipMapByDefault,
 		showFullTopologyOnSelection: state.showFullTopologyOnSelection,
 		showUnavailableGitOpsProviders: state.showUnavailableGitOpsProviders,
 		redactSecrets: state.redactSecrets,
@@ -281,6 +286,7 @@ export const useSettingsState = createStore<SettingsState>()(
 		(set) => ({
 			showExactTimestamps: false,
 			showUsageFooter: false,
+			showOwnershipMapByDefault: true,
 			showFullTopologyOnSelection: false,
 			showUnavailableGitOpsProviders: false,
 			redactSecrets: true,
@@ -305,6 +311,8 @@ export const useSettingsState = createStore<SettingsState>()(
 			setShowExactTimestamps: (show: boolean) =>
 				set({ showExactTimestamps: show }),
 			setShowUsageFooter: (show: boolean) => set({ showUsageFooter: show }),
+			setShowOwnershipMapByDefault: (show: boolean) =>
+				set({ showOwnershipMapByDefault: show }),
 			setShowFullTopologyOnSelection: (show: boolean) =>
 				set({ showFullTopologyOnSelection: show }),
 			setShowUnavailableGitOpsProviders: (show: boolean) =>

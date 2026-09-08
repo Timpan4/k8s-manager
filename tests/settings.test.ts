@@ -10,12 +10,25 @@ import {
 
 afterEach(() => {
 	useSettingsState.getState().setDebugModeEnabled(false);
+	useSettingsState.getState().setShowOwnershipMapByDefault(true);
 	useSettingsState.getState().setShowFullTopologyOnSelection(false);
 	useSettingsState.getState().setGitOpsViewMode("cards");
 	useSettingsState.getState().setHelmViewMode("cards");
 });
 
 describe("settings", () => {
+	test("opens the map by default and persists an explicit visibility preference", () => {
+		expect(useSettingsState.getState().showOwnershipMapByDefault).toBe(true);
+		useSettingsState.getState().setShowOwnershipMapByDefault(false);
+		const saved = partializeSettings(useSettingsState.getState());
+		expect(saved.showOwnershipMapByDefault).toBe(false);
+		useSettingsState.getState().setShowOwnershipMapByDefault(true);
+		const current = useSettingsState.getState();
+		expect(mergePersistedSettings(saved, current).showOwnershipMapByDefault).toBe(false);
+		expect(mergePersistedSettings({}, current).showOwnershipMapByDefault).toBe(true);
+		expect(mergePersistedSettings({ showOwnershipMapByDefault: "false" }, current).showOwnershipMapByDefault).toBe(true);
+	});
+
 	test("defaults diagnostics mode off and toggles it explicitly", () => {
 		expect(useSettingsState.getState().debugModeEnabled).toBe(false);
 
