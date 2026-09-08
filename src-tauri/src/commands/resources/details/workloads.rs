@@ -10,6 +10,52 @@ use kube::Client;
 
 use super::super::ingress_status::apply_ingress_status;
 
+pub(super) async fn replicaset_details(
+    client: Client,
+    cluster_context: String,
+    name: String,
+    namespace: Option<String>,
+) -> Result<ResourceDetailsFull, AppError> {
+    let (rs, yaml) = fetch_and_serialize::<k8s_openapi::api::apps::v1::ReplicaSet>(
+        client,
+        namespace.as_deref(),
+        &name,
+    )
+    .await?;
+    let metadata = serde_json::to_value(&rs.metadata)
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
+    let status = rs
+        .status
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| AppError::new(e.to_string(), AppErrorKind::Serialization).with_source(e))?;
+    let mut summary = crate::commands::helpers::base_resource_summary(
+        "ReplicaSet",
+        &cluster_context,
+        &rs.metadata,
+        resource_age(rs.metadata.creation_timestamp.clone().map(|t| {
+            Utc.timestamp_opt(t.0.as_second(), 0)
+                .single()
+                .unwrap_or_else(Utc::now)
+        })),
+    );
+    if let Some(ref status) = rs.status {
+        summary.ready = Some(fmt_ready(status.ready_replicas, status.replicas));
+        summary.status = Some(format!(
+            "Available: {}",
+            status.available_replicas.unwrap_or(0)
+        ));
+    }
+    update_resource_health(&mut summary);
+    Ok(ResourceDetailsFull {
+        summary,
+        yaml,
+        metadata,
+        status,
+    })
+}
+
 pub(super) async fn deployment_details(
     client: Client,
     cluster_context: String,
