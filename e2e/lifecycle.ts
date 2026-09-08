@@ -346,9 +346,13 @@ if (["run", "dev-up", "desktop-profile"].includes(action)) for (const signal of 
 
 async function fast() {
 	if (!(await Array.fromAsync(new Bun.Glob("e2e/specs/fast/**/*.e2e.ts").scan({ cwd: root }))).length) throw new Error("fast suite has no specs");
-	const frontend = Bun.spawn(["bun", "run", "dev", "--host", "127.0.0.1", "--port", "1420"], { cwd: root, stdout: "inherit", stderr: "inherit" });
-	try { for (let count = 0; count < 80; count++) { try { if ((await fetch("http://127.0.0.1:1420")).ok) break; } catch {} if (count === 79) throw new Error("Bun frontend did not become ready"); await Bun.sleep(250); } await runWdio("e2e/wdio.fast.conf.ts", { KUBECOVE_E2E_ARTIFACTS: join(root, "e2e", "artifacts", "fast") }); }
-	finally { frontend.kill(); await frontend.exited; }
+	const { createServer } = await import("vite");
+	const frontend = await createServer({ root, server: { host: "127.0.0.1", port: 1420, strictPort: true } });
+	try {
+		// Wait for Vite itself; HTTP polling can connect to its temporary port-check socket.
+		await frontend.listen();
+		await runWdio("e2e/wdio.fast.conf.ts", { KUBECOVE_E2E_ARTIFACTS: join(root, "e2e", "artifacts", "fast") });
+	} finally { await frontend.close(); }
 }
 async function buildAndDrive(env: Record<string, string | undefined>, smoke = false) {
 	const artifacts = env.KUBECOVE_E2E_ARTIFACTS;
