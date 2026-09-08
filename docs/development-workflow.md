@@ -41,7 +41,7 @@ bun run lint:anti-slop
 
 ## Browser Dev Mock Mode
 
-`bun run tauri dev` starts Bun's frontend dev server at `http://localhost:1430`. Opening it in a normal browser runs Svelte with browser-only mock Tauri responses for frontend inspection and automation.
+`bun run tauri dev` starts Vite on Bun at `http://localhost:1430`. Opening it in a normal browser runs Svelte with browser-only mock Tauri responses for frontend inspection and automation.
 
 Tauri webview uses real IPC and Rust Kubernetes commands. On Windows, development exposes Chrome DevTools Protocol at `http://127.0.0.1:9222`; set `KUBECOVE_DEVTOOLS_PORT` before launch to change it. Packaged apps do not expose this endpoint.
 
@@ -55,7 +55,7 @@ Use fast E2E while changing frontend behavior:
 bun run e2e:fast
 ```
 
-It starts Bun's frontend dev server, opens Chrome through WDIO, and uses typed development-browser mocks. It neither builds Rust nor contacts Kubernetes.
+It starts Vite on Bun, opens Chrome through WDIO, and uses typed development-browser mocks. It neither builds Rust nor contacts Kubernetes.
 
 Use real E2E for native-command and cluster behavior:
 
@@ -157,9 +157,9 @@ added to process memory. Missing groups and unsupported heap inspection are
 `null` with an explicit reason, never zero.
 
 Bundle sizes include every emitted file, with input ownership and chunk imports.
-Copied HTML assets missing from Bun's output metadata are attributed by exact
-source-byte matching. Input byte contributions are bundler estimates, not
-independent compressed sizes. Fonts may be embedded inside CSS. `rawBytes` is
+Public assets are included alongside generated chunks and styles. Schema version 2
+records source ownership without per-input byte estimates, which are not comparable
+between bundlers. `rawBytes` is
 emitted file size; gzip level 9 and Brotli quality 11 are deterministic per-file
 compression comparisons, not installer sizes or measured network transfers.
 Totals include deferred chunks. Reports exclude timestamps and absolute source

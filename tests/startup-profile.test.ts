@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { build as viteBuild } from "vite";
 import { assertPortAvailable, hasRunningApp, stopOwnedProfileProcess } from "../e2e/harness/desktop-profile";
 import { startupReport } from "../e2e/harness/startup-report";
 import { frontendBundleReport } from "../scripts/frontend-bundle-report";
@@ -66,13 +67,14 @@ test("bundle report has deterministic compression, portable ownership, and dynam
 	try {
 		await writeFile(join(root, "entry.ts"), 'console.log("entry"); void import("./lazy.ts");');
 		await writeFile(join(root, "lazy.ts"), 'console.log("lazy");');
-		const build = await Bun.build({ root, entrypoints: [join(root, "entry.ts")], outdir: join(root, "dist"), splitting: true, metafile: true });
-		if (!build.metafile) throw new Error("Missing metafile");
-		const report = await frontendBundleReport(root, join(root, "dist"), build.outputs, build.metafile);
-		expect(await frontendBundleReport(root, join(root, "dist"), build.outputs, build.metafile)).toEqual(report);
+		const build = await viteBuild({ configFile: false, root, logLevel: "silent", build: { rolldownOptions: { input: join(root, "entry.ts") } } });
+		if (!("output" in build)) throw new Error("Expected a single build output");
+		const bundle = Object.fromEntries(build.output.map((output) => [output.fileName, output]));
+		const report = await frontendBundleReport(root, join(root, "dist"), bundle, false);
+		expect(await frontendBundleReport(root, join(root, "dist"), bundle, false)).toEqual(report);
 		expect(report.files.length).toBeGreaterThan(1);
 		expect(report.files.some((file) => file.imports.some((entry) => entry.kind === "dynamic-import"))).toBe(true);
-		expect(report.totals.rawBytes).toBe(build.outputs.reduce((sum, output) => sum + output.size, 0));
+		expect(report.totals.rawBytes).toBe(build.output.reduce((sum, output) => sum + Buffer.byteLength(output.type === "chunk" ? output.code : output.source), 0));
 		expect(report.totals.gzipBytes).toBeGreaterThan(0);
 		expect(JSON.stringify(report)).not.toContain(root);
 		expect(report.files.some((file) => file.inputs.some((input) => input.path === "entry.ts"))).toBe(true);
@@ -99,16 +101,18 @@ test("interrupt cleanup stops only a process owned by the profile", async () => 
 	}
 });
 
-test("copied HTML assets receive source ownership even when Bun omits their output metadata", async () => {
+test("copied public assets receive source ownership in the Vite report", async () => {
 	const root = await mkdtemp(join(tmpdir(), "kubecove-html-test-"));
 	try {
-		await writeFile(join(root, "logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
-		await writeFile(join(root, "index.html"), '<html><head><link rel="icon" href="./logo.svg"></head><body></body></html>');
-		const build = await Bun.build({ entrypoints: [join(root, "index.html")], outdir: join(root, "dist"), metafile: true });
-		if (!build.metafile) throw new Error("Missing metafile");
-		const report = await frontendBundleReport(root, join(root, "dist"), build.outputs, build.metafile);
+		await mkdir(join(root, "public"));
+		await writeFile(join(root, "public", "logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+		await writeFile(join(root, "index.html"), '<html><head><link rel="icon" href="/logo.svg"></head><body></body></html>');
+		const build = await viteBuild({ configFile: false, root, logLevel: "silent" });
+		if (!("output" in build)) throw new Error("Expected a single build output");
+		const bundle = Object.fromEntries(build.output.map((output) => [output.fileName, output]));
+		const report = await frontendBundleReport(root, join(root, "dist"), bundle, join(root, "public"));
 		const asset = report.files.find((file) => file.path.endsWith(".svg"));
-		expect(asset?.inputs[0].path).toBe("logo.svg");
+		expect(asset?.inputs[0].path).toBe("public/logo.svg");
 		expect(asset?.inputs[0].owner).toBe("app-assets");
 	} finally {
 		await rm(root, { recursive: true, force: true });

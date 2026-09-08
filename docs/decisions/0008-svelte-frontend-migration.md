@@ -4,7 +4,7 @@
 
 Accepted. Superseded by the completed Svelte cutover: Svelte is now the only frontend runtime.
 
-The stack below records the migration-era decision. Current frontend development and production builds use Bun's native bundler.
+The stack below records the migration-era decision. Current frontend development and production builds use Vite running on Bun with the official Svelte plugin.
 
 ## Context
 

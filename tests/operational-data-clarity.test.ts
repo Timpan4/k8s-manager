@@ -87,7 +87,7 @@ describe("operational data clarity", () => {
 		expect(RESTART_COUNT_NOT_REPORTED).toBe("Restart count not reported");
 	});
 
-	test("renders copyable full values and writes the untruncated value", async () => {
+	test("omits full-value hover titles while copying the untruncated value", async () => {
 		const value = "very-long-resource-name-that-is-visually-truncated";
 		const body = await renderSvelte("tests/fixtures/CopyableTextHost.svelte", {
 			value,
@@ -108,7 +108,7 @@ describe("operational data clarity", () => {
 		);
 		await copyTextWithAnnouncement(announce, clipboard, value, "resource name");
 
-		expect(body).toContain(`title="${value}"`);
+		expect(body).not.toContain(`title="${value}"`);
 		expect(body).toContain(`aria-label="Open resource ${value}" aria-pressed="true"`);
 		expect(body).toContain(`aria-label="Copy resource name: ${value}"`);
 		expect(body.match(/<button/g)).toHaveLength(2);

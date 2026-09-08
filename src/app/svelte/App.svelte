@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
+	import CopyToast from "@/components/CopyToast.svelte";
 	import { markStartup } from "@/lib/startup-marks";
 	import { useQueryClient } from "@tanstack/svelte-query";
 	import { FolderOpen, Settings } from "lucide-svelte";
@@ -229,6 +230,8 @@
 		};
 	});
 </script>
+
+<CopyToast />
 
 <TooltipProvider>
 	{#if workspaceTransitionPending}
