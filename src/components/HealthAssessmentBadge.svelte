@@ -5,13 +5,15 @@
 		healthSourceSummary,
 		healthStateLabel,
 	} from "@/lib/resource-health";
-	import { Badge } from "@/components/ui/svelte";
+	import { Badge, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/svelte";
 
 	let {
 		assessment,
 		loading = false,
 		details = false,
-	}: { assessment?: HealthAssessment | null; loading?: boolean; details?: boolean } = $props();
+		compact = false,
+		rawStatuses = [],
+	}: { assessment?: HealthAssessment | null; loading?: boolean; details?: boolean; compact?: boolean; rawStatuses?: string[] } = $props();
 
 	const state = $derived(assessment?.state);
 	const label = $derived(
@@ -39,8 +41,31 @@
 </script>
 
 <div class="flex min-w-0 flex-wrap items-center gap-1.5">
-	<Badge {variant} class={tone}>{label}</Badge>
-	<span class="truncate text-[0.6875rem] text-muted-foreground" title={source}>Source: {source}</span>
+	{#if compact}
+		<Tooltip>
+			<TooltipTrigger type="button" class="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+				<Badge {variant} class={tone}>{label}</Badge>
+			</TooltipTrigger>
+			<TooltipContent class="max-w-sm flex-col items-stretch rounded-lg border border-border bg-surface-2 p-3 text-popover-foreground shadow-xl">
+				<div class="grid gap-3 text-xs">
+					<div>
+						<p class="font-medium text-sm">{label}</p>
+						<p class="mt-1 text-muted-foreground">{source}</p>
+					</div>
+					{#if rawStatuses.length > 0}
+						<div class="flex flex-wrap gap-2 border-t border-border pt-3">
+							{#each rawStatuses as status}
+								<Badge variant="outline" class="whitespace-normal break-words">{status}</Badge>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	{:else}
+		<Badge {variant} class={tone}>{label}</Badge>
+		<span class="truncate text-[0.6875rem] text-muted-foreground" title={source}>Source: {source}</span>
+	{/if}
 	{#if assessment?.completeness === "partial"}
 		<Badge variant="outline" class="border-dashed">Partial</Badge>
 	{/if}
