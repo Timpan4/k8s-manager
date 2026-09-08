@@ -370,6 +370,11 @@ fn builds_deployment_to_replicaset_to_pod_edges_from_owner_uids() {
         "api-7d9",
     );
     let pod_id = topology_node_id("kind-dev", "v1", "Pod", Some("default"), "api-7d9-x");
+    let replica_set = topology.nodes.iter().find(|node| node.id == rs_id).unwrap();
+    assert!(replica_set.selectable);
+    assert_eq!(replica_set.summary.kind, "ReplicaSet");
+    assert_eq!(replica_set.summary.name, "api-7d9");
+    assert_eq!(replica_set.summary.namespace.as_deref(), Some("default"));
 
     assert!(topology.edges.iter().any(|edge| {
         edge.source == deploy_id && edge.target == rs_id && edge.relation == TopologyRelation::Owns
