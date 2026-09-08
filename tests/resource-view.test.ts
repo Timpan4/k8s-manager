@@ -40,8 +40,8 @@ describe("resource view safeguards", () => {
 		expect(browserSource).toContain("Collapse resource table");
 		expect(browserSource).not.toContain('resourceView === "map"');
 		expect(browserSource).not.toContain('resourceView === "table"');
-		expect(settingsSource).not.toContain("showOwnershipMapByDefault");
-		expect(settingsSurfaceSource).not.toContain("Show ownership map by default");
+		expect(settingsSource).toContain("showOwnershipMapByDefault");
+		expect(settingsSurfaceSource).toContain("Show ownership map by default");
 	});
 
 	test("sizes resource controls from their pane instead of the viewport", () => {

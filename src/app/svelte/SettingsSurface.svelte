@@ -63,6 +63,10 @@
 			description:
 				"Shows unrelated ownership branches while a resource is selected. Large namespaces may render slower.",
 		},
+		ownershipMap: {
+			title: "Show ownership map by default",
+			description: "Opens the ownership map in new resource views. Returning to a view restores its previous layout.",
+		},
 	unavailableGitOpsProviders: {
 		title: "Show unavailable GitOps providers",
 		description:
@@ -357,6 +361,13 @@
 					checked={settings.showFullTopologyOnSelection}
 					onCheckedChange={settings.setShowFullTopologyOnSelection}
 					aria-label={GENERAL_ROWS.fullTopologyOnSelection.title}
+				/>
+			</SettingsRow>
+			<SettingsRow {...GENERAL_ROWS.ownershipMap}>
+				<Switch
+					checked={settings.showOwnershipMapByDefault}
+					onCheckedChange={settings.setShowOwnershipMapByDefault}
+					aria-label={GENERAL_ROWS.ownershipMap.title}
 				/>
 			</SettingsRow>
 			<SettingsRow {...GENERAL_ROWS.unavailableGitOpsProviders}>
