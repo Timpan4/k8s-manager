@@ -89,7 +89,7 @@
 	import { gitOpsOwnership } from "@/lib/gitops-ownership-evidence";
 		import { cnfast } from "@/lib/utils";
 	import type { ArgoApplicationSummary } from "@/lib/gitops-types";
-	import { settingsStore } from "@/lib/settings-store";
+	import { getSettingsSnapshot, settingsStore } from "@/lib/settings-store";
 	import { queryKeys } from "@/lib/queryKeys";
 	import type { PathStateResourceBrowserState } from "@/lib/path-state";
 	import {
@@ -227,7 +227,7 @@
 	let appliedAvailableKindsKey = $state("");
 	// svelte-ignore state_referenced_locally
 	let mapPanelOpen = $state(
-		initialOwnershipMapOpen(initialPathState),
+		initialOwnershipMapOpen(initialPathState, getSettingsSnapshot().showOwnershipMapByDefault),
 	);
 	let hideHistoricalReplicaSets = $state(false);
 	let OwnershipMapComponent = $state<typeof import("./OwnershipMap.svelte").default | null>(null);
@@ -302,7 +302,7 @@
 		collapsedGroups = new Set(pathState?.collapsedGroups ?? []);
 		selectedTopologyNodeId = pathState?.selectedTopologyNodeId ?? null;
 		topologyMode = pathState?.topologyMode ?? "ownership";
-		mapPanelOpen = pathState?.mapPanelOpen ?? false;
+		mapPanelOpen = initialOwnershipMapOpen(pathState, getSettingsSnapshot().showOwnershipMapByDefault);
 		tablePanelOpen = pathState?.tablePanelOpen ?? true;
 		initialPathStateConsumed = true;
 	});
