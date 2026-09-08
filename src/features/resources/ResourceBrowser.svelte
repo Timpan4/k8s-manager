@@ -1374,12 +1374,7 @@
 												<TableCell>{row.namespace ?? EMPTY_CELL}</TableCell>
 												<TableCell>{row.kind}</TableCell>
 												<TableCell>
-													<HealthAssessmentBadge assessment={resourceHealthAssessment(row)} />
-													{#if row.status}
-														<div class="mt-1 truncate text-[0.6875rem] text-muted-foreground" title={row.status}>
-															Raw: {row.status}
-														</div>
-													{/if}
+													<HealthAssessmentBadge assessment={resourceHealthAssessment(row)} compact rawStatuses={row.status ? [row.status] : []} />
 												</TableCell>
 												{#if tableModel.columnVisibility.ready}
 													<TableCell>
