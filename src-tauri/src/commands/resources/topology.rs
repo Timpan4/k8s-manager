@@ -96,7 +96,7 @@ pub(crate) fn topology_standalone_kinds() -> &'static [&'static str] {
 }
 
 fn selectable_kind(kind: &str) -> bool {
-    !matches!(kind, "ReplicaSet" | "EndpointSlice")
+    kind != "EndpointSlice"
 }
 
 pub(super) fn input_from_metadata(

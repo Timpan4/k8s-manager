@@ -548,7 +548,7 @@ function topologyNode(row: ResourceSummary, cluster: string, portHints: string[]
 function replicaSetFor(row: ResourceSummary, cluster: string) {
 	const name = row.name === "payments-api" ? "payments-api-7d9c9b7f8d" : `${row.name}-54b7f7bdbc`;
 	const summary = res("ReplicaSet", name, row.namespace, row.health, row.ready, row.status, 0, row.argoApp ? "shop" : "platform", { apiVersion: "apps/v1", cluster });
-	return { ...topologyNode(summary, cluster), selectable: false };
+	return topologyNode(summary, cluster);
 }
 
 function topologyId(row: Pick<ResourceSummary, "apiVersion" | "kind" | "namespace" | "name">, cluster: string): string {
