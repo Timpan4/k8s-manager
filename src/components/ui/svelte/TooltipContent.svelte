@@ -22,6 +22,5 @@
 		{...rest}
 	>
 		{@render children?.()}
-		<TooltipPrimitive.Arrow class="size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px] bg-inherit fill-inherit" />
 	</TooltipPrimitive.Content>
 </TooltipPrimitive.Portal>

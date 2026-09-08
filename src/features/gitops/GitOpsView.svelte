@@ -499,11 +499,17 @@
 								{@const sourceLine = gitOpsSelectionSourceLine(item)}
 								<div
 									class={gitOpsSelectionKey(item) === selectedGitOpsItemKey
-										? "group flex h-[18.5rem] overflow-hidden rounded-lg border border-primary/60 bg-accent/40 text-xs/relaxed shadow-sm transition-all hover:-translate-y-px hover:border-primary/70 hover:bg-accent/50 hover:shadow-md motion-reduce:transition-none motion-reduce:hover:translate-y-0"
-										: "group flex h-[18.5rem] overflow-hidden rounded-lg border bg-surface-1 text-xs/relaxed transition-all hover:-translate-y-px hover:border-primary/50 hover:bg-accent/30 hover:shadow-md motion-reduce:transition-none motion-reduce:hover:translate-y-0"}
+										? "group relative flex h-[18.5rem] overflow-hidden rounded-lg border border-primary/60 bg-accent/40 text-xs/relaxed shadow-sm transition-all hover:-translate-y-px hover:border-primary/70 hover:bg-accent/50 hover:shadow-md motion-reduce:transition-none motion-reduce:hover:translate-y-0"
+										: "group relative flex h-[18.5rem] overflow-hidden rounded-lg border bg-surface-1 text-xs/relaxed transition-all hover:-translate-y-px hover:border-primary/50 hover:bg-accent/30 hover:shadow-md motion-reduce:transition-none motion-reduce:hover:translate-y-0"}
 								>
-									<div class={`w-1 shrink-0 ${gitOpsCardTone(item)}`}></div>
-									<div class="flex min-w-0 flex-1 flex-col p-3">
+									<button
+										type="button"
+										class="absolute inset-0 cursor-pointer rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+										aria-label={gitOpsCardActionLabel(item)}
+										onclick={() => openGitOpsSelection(item)}
+									></button>
+									<div class={`pointer-events-none w-1 shrink-0 ${gitOpsCardTone(item)}`}></div>
+									<div class="pointer-events-none relative flex min-w-0 flex-1 flex-col p-3 [&_button]:pointer-events-auto [&_a]:pointer-events-auto">
 										<div class="flex items-start justify-between gap-3">
 											<div class="min-w-0 flex-1 space-y-0.5">
 												<CopyableText

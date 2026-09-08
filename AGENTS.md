@@ -6,6 +6,12 @@ This repository is for KubeCove, a local desktop Kubernetes workspace built with
 
 KubeCove uses Svelte as its frontend runtime.
 
+### Bits UI changes require explicit permission
+
+- Do not modify, remove, replace, or override Bits UI primitives, their styling or behavior, or local shared wrappers under `src/components/ui/svelte/` without the user's explicit permission for that change.
+- A general request to fix or improve a screen or tooltip does not authorize changing shared Bits UI components. Explain the proposed shared change and obtain permission first.
+- Use the existing public component API for feature-level changes. Do not bypass this rule with global CSS, dependency patches, replacement components, or indirect overrides.
+
 - Default frontend work should fit the Svelte app and preserve typed Tauri command boundaries.
 - Prefer shared typed helpers/models where they reduce drift, but avoid new abstractions unless they are needed for parity with product behavior or testability.
 
