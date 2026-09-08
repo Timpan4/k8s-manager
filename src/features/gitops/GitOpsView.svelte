@@ -534,17 +534,12 @@
 											{/if}
 										</div>
 										<div class="mt-3">
-											<HealthAssessmentBadge assessment={item.item.healthAssessment} />
+											<HealthAssessmentBadge
+												assessment={item.item.healthAssessment}
+												compact
+												rawStatuses={gitOpsCardBadges(item).map(([label, value]) => `${label}: ${formatStatusLabel(value)}`)}
+											/>
 										</div>
-										{#if gitOpsCardBadges(item).length > 0}
-											<div class="mt-3 flex flex-wrap gap-1.5">
-												{#each gitOpsCardBadges(item) as [label, value]}
-													<Badge variant="outline" class={gitOpsStatusClass(value)}>
-														Raw {label}: {formatStatusLabel(value)}
-													</Badge>
-												{/each}
-											</div>
-										{/if}
 										{#if sourceLine}
 											<Tooltip>
 												<TooltipTrigger
