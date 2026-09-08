@@ -16,8 +16,9 @@ import {
 
 export function initialOwnershipMapOpen(
 	restoredState: { mapPanelOpen: boolean } | null | undefined,
+	showByDefault: boolean,
 ): boolean {
-	return restoredState?.mapPanelOpen ?? false;
+	return restoredState?.mapPanelOpen ?? showByDefault;
 }
 
 export function shouldLoadOwnershipMap(

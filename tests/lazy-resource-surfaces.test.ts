@@ -7,7 +7,7 @@ describe("lazy resource surfaces", () => {
 
 		expect(source).not.toContain('import OwnershipMap from "./OwnershipMap.svelte"');
 		expect(source).toContain('import("./OwnershipMap.svelte")');
-		expect(source).toContain("initialOwnershipMapOpen(initialPathState)");
+		expect(source).toContain("initialOwnershipMapOpen(initialPathState, getSettingsSnapshot().showOwnershipMapByDefault)");
 		expect(source).toContain("shouldLoadOwnershipMap(");
 		expect(source).toContain("function retryOwnershipMapLoad()");
 		expect(source).toContain("function retryOwnershipMap()");
