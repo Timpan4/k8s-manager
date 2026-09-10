@@ -239,7 +239,7 @@
 	let metricsQueryReady = $state(false);
 	let realtimeStatus = $state("idle");
 	let realtimeMessage = $state("Realtime idle");
-	let realtimeError = $state("");
+	let realtimeError = $state<unknown>("");
 	let tableViewportElement = $state<HTMLDivElement | null>(null);
 	let initialPathStateConsumed = $state(false);
 	const showFullTopologyOnSelection = $derived($settingsStore.showFullTopologyOnSelection);
@@ -932,7 +932,7 @@
 				if (cancelled) return;
 				realtimeStatus = "error";
 				realtimeMessage = "Realtime watch failed";
-				realtimeError = cause instanceof Error ? cause.message : String(cause);
+				realtimeError = cause;
 			});
 		return () => {
 			cancelled = true;
